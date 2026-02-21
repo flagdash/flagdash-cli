@@ -1,0 +1,35 @@
+{
+  "name": "@flagdash/cli",
+  "version": "0.1.0",
+  "description": "FlagDash CLI — Interactive terminal UI for feature flag management",
+  "license": "MIT",
+  "bin": {
+    "flagdash": "./bin/flagdash"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/flagdash/flagdash.git"
+  },
+  "homepage": "https://flagdash.io",
+  "keywords": [
+    "feature-flags",
+    "tui",
+    "cli",
+    "flagdash",
+    "feature-toggles"
+  ],
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=14"
+  }
+}

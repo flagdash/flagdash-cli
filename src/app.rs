@@ -545,8 +545,11 @@ impl App {
             Action::WebhookSecretRegenerated(webhook) | Action::WebhookReactivated(webhook) => {
                 self.webhook_detail.webhook = Some(*webhook);
             }
-            Action::ApiError(msg) => {
-                self.toast.show(msg, ToastLevel::Error);
+            Action::ApiError(ref msg) => {
+                if matches!(self.current_view, View::Login) {
+                    self.login_view.set_error(msg);
+                }
+                self.toast.show(msg.clone(), ToastLevel::Error);
             }
             Action::SetLoading(loading) => {
                 self.status_bar.loading = loading;
@@ -708,7 +711,14 @@ impl App {
                     let _ = tx.send(Action::DeviceAuthReceived(Box::new(resp)));
                 }
                 Err(e) => {
-                    let _ = tx.send(Action::ApiError(format!("Failed to start login: {}", e)));
+                    let msg = if e.to_string().contains("Network")
+                        || e.to_string().contains("error sending request")
+                    {
+                        format!("Unable to connect to {}. Is the server running?", base_url)
+                    } else {
+                        format!("Failed to start login: {}", e)
+                    };
+                    let _ = tx.send(Action::ApiError(msg));
                 }
             }
         });
@@ -1658,6 +1668,7 @@ impl App {
 
         if matches!(self.current_view, View::Login) {
             self.login_view.render(frame, area);
+            self.toast.render(frame, area);
             return;
         }
 

@@ -85,11 +85,17 @@ On first run, enter your management API key. It will be saved to `~/.config/flag
 
 ## Configuration
 
-Config file: `~/.config/flagdash/config.toml`
+Config file location (platform-dependent):
+
+| Platform | Path |
+|----------|------|
+| **macOS** | `~/Library/Application Support/flagdash/config.toml` |
+| **Linux** | `~/.config/flagdash/config.toml` |
+| **Windows** | `%APPDATA%\flagdash\config.toml` |
 
 ```toml
 [auth]
-api_key = "management_xxx"
+session_token = "session_xxx"
 
 [connection]
 base_url = "https://flagdash.io"
@@ -98,6 +104,8 @@ base_url = "https://flagdash.io"
 project_id = "prj_xxx"
 environment_id = "env_xxx"
 ```
+
+To reset the CLI (e.g., switch from local dev to production), delete the config file and re-launch.
 
 ### Priority
 

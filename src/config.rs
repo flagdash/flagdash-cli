@@ -106,6 +106,8 @@ impl AppConfig {
             config.defaults.environment_id = eid.to_string();
         }
 
+        validate_base_url(&config.connection.base_url)?;
+
         Ok(config)
     }
 
@@ -122,14 +124,19 @@ impl AppConfig {
     }
 
     /// Save the current config to the config file.
+    ///
+    /// The file holds the bearer session token, so on Unix it is written with
+    /// owner-only permissions (dir 0700, file 0600) to keep other local users
+    /// from reading the credential.
     pub fn save(&self) -> Result<()> {
         let path = config_file_path()?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating config dir {}", parent.display()))?;
+            restrict_dir_permissions(parent);
         }
         let content = toml::to_string_pretty(self).context("serializing config")?;
-        std::fs::write(&path, content)
+        write_private(&path, content.as_bytes())
             .with_context(|| format!("writing config to {}", path.display()))?;
         Ok(())
     }
@@ -212,6 +219,81 @@ impl KeyTier {
     }
 }
 
+/// Reject plaintext-HTTP base URLs pointing at a non-local host, since the
+/// bearer session token would be transmitted in cleartext. `https://` is always
+/// allowed; `http://` is allowed only for localhost/loopback (local dev).
+fn validate_base_url(base_url: &str) -> Result<()> {
+    let lower = base_url.trim().to_lowercase();
+
+    if lower.starts_with("https://") {
+        return Ok(());
+    }
+
+    if let Some(rest) = lower.strip_prefix("http://") {
+        // Extract the host, handling bracketed IPv6 literals (e.g. "[::1]:4000").
+        let host = if let Some(after) = rest.strip_prefix('[') {
+            match after.split_once(']') {
+                Some((inner, _)) => format!("[{inner}]"),
+                None => rest.to_string(),
+            }
+        } else {
+            rest.split(['/', ':', '?']).next().unwrap_or("").to_string()
+        };
+
+        let is_local = matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1" | "[::1]")
+            || host.ends_with(".localhost");
+
+        if is_local {
+            return Ok(());
+        }
+
+        anyhow::bail!(
+            "Refusing to use insecure base URL {base_url:?}: the session token would be sent \
+             over plaintext HTTP. Use https:// (http:// is only allowed for localhost)."
+        );
+    }
+
+    // No scheme or an unexpected scheme — leave as-is; the HTTP client will
+    // surface a clearer error when it tries to connect.
+    Ok(())
+}
+
+/// Write a file with owner-only permissions (0600) on Unix. The file is
+/// created with the restrictive mode from the start (via OpenOptions) so the
+/// token is never briefly readable at a wider mode. On non-Unix platforms this
+/// falls back to a plain write.
+#[cfg(unix)]
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    // Ensure mode is 0600 even if the file already existed with wider perms.
+    let perms = std::fs::Permissions::from_mode(0o600);
+    file.set_permissions(perms)?;
+    file.write_all(bytes)
+}
+
+#[cfg(not(unix))]
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, bytes)
+}
+
+/// Best-effort tighten of the config directory to owner-only (0700) on Unix.
+#[cfg(unix)]
+fn restrict_dir_permissions(dir: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+}
+
+#[cfg(not(unix))]
+fn restrict_dir_permissions(_dir: &std::path::Path) {}
+
 /// Returns the platform-appropriate config file path.
 pub fn config_file_path() -> Result<PathBuf> {
     let config_dir = dirs::config_dir()
@@ -250,6 +332,23 @@ mod tests {
         assert!(KeyTier::Session.can_mutate());
         assert!(!KeyTier::Server.can_mutate());
         assert!(!KeyTier::Client.can_mutate());
+    }
+
+    #[test]
+    fn test_validate_base_url() {
+        // https is always allowed
+        assert!(validate_base_url("https://flagdash.io").is_ok());
+        assert!(validate_base_url("https://self-hosted.example.com").is_ok());
+
+        // http allowed only for localhost/loopback
+        assert!(validate_base_url("http://localhost:4000").is_ok());
+        assert!(validate_base_url("http://127.0.0.1:4000").is_ok());
+        assert!(validate_base_url("http://[::1]:4000").is_ok());
+
+        // http to a remote host is rejected (would leak the token in cleartext)
+        assert!(validate_base_url("http://flagdash.io").is_err());
+        assert!(validate_base_url("http://192.168.1.50:4000").is_err());
+        assert!(validate_base_url("HTTP://Example.COM").is_err());
     }
 
     #[test]

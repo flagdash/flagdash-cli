@@ -43,6 +43,26 @@ struct Cli {
     environment_id: Option<String>,
 }
 
+/// Create the log file with owner-only permissions (0600) on Unix so its
+/// contents aren't readable by other local users. Falls back to a plain create
+/// on other platforms. Returns None if creation fails (logging is best-effort).
+#[cfg(unix)]
+fn create_private_log_file(path: &std::path::Path) -> Option<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .ok()
+}
+
+#[cfg(not(unix))]
+fn create_private_log_file(path: &std::path::Path) -> Option<std::fs::File> {
+    std::fs::File::create(path).ok()
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Parse CLI args
@@ -55,17 +75,25 @@ async fn main() -> Result<()> {
         original_hook(panic_info);
     }));
 
-    // Initialize tracing (logs to file, not stdout)
+    // Initialize tracing (logs to file, not stdout).
+    // Default to INFO to avoid capturing verbose dependency (reqwest/hyper) logs
+    // into a file; opt into DEBUG only when FLAGDASH_DEBUG is set. The log file
+    // is created owner-only (0600) on Unix so it isn't world-readable.
     let log_dir = dirs::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("flagdash");
     std::fs::create_dir_all(&log_dir).ok();
-    let log_file = std::fs::File::create(log_dir.join("flagdash.log")).ok();
+    let log_file = create_private_log_file(&log_dir.join("flagdash.log"));
     if let Some(file) = log_file {
+        let level = if std::env::var_os("FLAGDASH_DEBUG").is_some() {
+            tracing::Level::DEBUG
+        } else {
+            tracing::Level::INFO
+        };
         tracing_subscriber::fmt()
             .with_writer(file)
             .with_ansi(false)
-            .with_max_level(tracing::Level::DEBUG)
+            .with_max_level(level)
             .init();
     }
 

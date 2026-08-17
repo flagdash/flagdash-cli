@@ -80,6 +80,11 @@ pub struct App {
     // Async action channel
     pub action_tx: mpsc::UnboundedSender<Action>,
     pub action_rx: mpsc::UnboundedReceiver<Action>,
+
+    // Handle to the in-flight device-authorization polling task, if any.
+    // Stored so it can be aborted on retry/logout/success — otherwise repeated
+    // login attempts stack concurrent polling loops that run until expiry.
+    pub device_poll_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl App {
@@ -132,6 +137,7 @@ impl App {
             env_list: EnvironmentListView::new(),
             action_tx,
             action_rx,
+            device_poll_task: None,
         };
 
         // Navigate to the correct initial view (triggers data loading)
@@ -738,7 +744,11 @@ impl App {
         let expires_in = device_auth.expires_in;
         let tx = self.action_tx.clone();
 
-        tokio::spawn(async move {
+        // Abort any previous polling loop before starting a new one, so repeated
+        // login attempts (Esc → retry) don't stack concurrent pollers.
+        self.abort_device_poll();
+
+        let handle = tokio::spawn(async move {
             let client = ApiClient::new_unauthenticated(&base_url);
             let max_polls = expires_in / interval.max(1);
             let sleep_duration = std::time::Duration::from_secs(interval.max(2));
@@ -775,6 +785,15 @@ impl App {
                 },
             )));
         });
+
+        self.device_poll_task = Some(handle);
+    }
+
+    /// Abort the in-flight device-auth polling task, if any.
+    fn abort_device_poll(&mut self) {
+        if let Some(handle) = self.device_poll_task.take() {
+            handle.abort();
+        }
     }
 
     fn handle_device_token_poll_result(
@@ -782,7 +801,11 @@ impl App {
         response: crate::api::types::DeviceTokenResponse,
     ) {
         if let Some(token) = response.session_token {
-            // Success! Store the session token and user info
+            // Success! The polling loop has already returned on its side, but
+            // drop our handle so we don't hold a finished task around.
+            self.abort_device_poll();
+
+            // Store the session token and user info
             self.config.auth.session_token = token;
 
             if let Some(user) = &response.user {
@@ -841,6 +864,9 @@ impl App {
     }
 
     fn handle_logout(&mut self) {
+        // Stop any in-flight device-auth polling loop on logout.
+        self.abort_device_poll();
+
         self.config.clear_auth();
         let _ = self.config.save();
         self.api = None;
@@ -1121,7 +1147,7 @@ impl App {
 
             // Recent flags for dashboard table (up to 8, most recently updated)
             let mut sorted_flags = flags.clone();
-            sorted_flags.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            sorted_flags.sort_by_key(|f| std::cmp::Reverse(f.updated_at));
             let recent_flags: Vec<DashboardFlag> = sorted_flags
                 .iter()
                 .take(8)

@@ -27,22 +27,42 @@ impl EventHandler {
 
         tokio::spawn(async move {
             loop {
-                if event::poll(tick_rate).unwrap_or(false) {
-                    match event::read() {
+                match event::poll(tick_rate) {
+                    Ok(true) => match event::read() {
                         Ok(CrosstermEvent::Key(key)) => {
                             if event_tx.send(Event::Key(key)).is_err() {
                                 break;
                             }
                         }
+                        // clippy suggests folding this into a match guard. Declined
+                        // on purpose: the condition sends on the channel, and a
+                        // guard that mutates state while deciding whether an arm
+                        // matches is far harder to read than the nested `if`.
+                        #[allow(clippy::collapsible_match)]
                         Ok(CrosstermEvent::Resize(w, h)) => {
                             if event_tx.send(Event::Resize(w, h)).is_err() {
                                 break;
                             }
                         }
                         _ => {}
+                    },
+                    // No event within tick_rate: poll already waited, so emitting
+                    // a Tick here is correctly paced (~1 per tick_rate).
+                    Ok(false) => {
+                        if event_tx.send(Event::Tick).is_err() {
+                            break;
+                        }
                     }
-                } else if event_tx.send(Event::Tick).is_err() {
-                    break;
+                    // poll errored (e.g. stdin closed). Previously this fell into
+                    // the `else` branch and emitted a Tick immediately with no
+                    // delay, spinning the loop at 100% CPU. Back off for a full
+                    // tick before retrying so a persistent error can't busy-loop.
+                    Err(_) => {
+                        tokio::time::sleep(tick_rate).await;
+                        if event_tx.send(Event::Tick).is_err() {
+                            break;
+                        }
+                    }
                 }
             }
         });

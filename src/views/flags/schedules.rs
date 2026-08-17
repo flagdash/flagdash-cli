@@ -70,10 +70,8 @@ impl FlagSchedulesView {
                         self.state.select(Some(new));
                     }
                 }
-                KeyCode::Tab => {
-                    if !self.environments.is_empty() {
-                        self.selected_env = (self.selected_env + 1) % self.environments.len();
-                    }
+                KeyCode::Tab if !self.environments.is_empty() => {
+                    self.selected_env = (self.selected_env + 1) % self.environments.len();
                 }
                 _ => {}
             }

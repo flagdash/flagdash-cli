@@ -57,10 +57,8 @@ impl FlagToggleView {
                     };
                     self.state.select(Some(new));
                 }
-                KeyCode::Enter | KeyCode::Char('t') => {
-                    if !self.environments.is_empty() {
-                        return Some(Action::SubmitFlagToggle(self.flag_key.clone()));
-                    }
+                KeyCode::Enter | KeyCode::Char('t') if !self.environments.is_empty() => {
+                    return Some(Action::SubmitFlagToggle(self.flag_key.clone()));
                 }
                 _ => {}
             }

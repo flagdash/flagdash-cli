@@ -60,10 +60,8 @@ impl FlagRolloutView {
                         self.selected_env = (self.selected_env + 1) % self.environments.len();
                     }
                 }
-                KeyCode::Enter => {
-                    if !self.environments.is_empty() {
-                        return Some(Action::SubmitRolloutUpdate(self.flag_key.clone()));
-                    }
+                KeyCode::Enter if !self.environments.is_empty() => {
+                    return Some(Action::SubmitRolloutUpdate(self.flag_key.clone()));
                 }
                 _ => {}
             }

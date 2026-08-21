@@ -12,6 +12,7 @@ const SECTIONS: &[SidebarSection] = &[
     SidebarSection::Flags,
     SidebarSection::Configs,
     SidebarSection::AiConfigs,
+    SidebarSection::Experiments,
     SidebarSection::Webhooks,
     SidebarSection::Environments,
 ];
@@ -21,8 +22,9 @@ const TAB_TITLES: &[&str] = &[
     "[2] Flags",
     "[3] Config",
     "[4] AI Config",
-    "[5] Webhooks",
-    "[6] Environments",
+    "[5] Experiments",
+    "[6] Webhooks",
+    "[7] Environments",
 ];
 
 pub struct Sidebar {
@@ -48,6 +50,7 @@ impl Sidebar {
                 KeyCode::Char('4') => return self.select_index(3),
                 KeyCode::Char('5') => return self.select_index(4),
                 KeyCode::Char('6') => return self.select_index(5),
+                KeyCode::Char('7') => return self.select_index(6),
                 KeyCode::Left => return self.select_prev(),
                 KeyCode::Right => return self.select_next(),
                 _ => {}

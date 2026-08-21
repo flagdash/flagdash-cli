@@ -20,6 +20,8 @@ pub enum Action {
     ConfigLoaded(Box<ManagedConfig>),
     AiConfigsLoaded(Vec<ManagedAiConfig>),
     AiConfigLoaded(Box<ManagedAiConfig>),
+    ExperimentsLoaded(Vec<ManagedExperiment>),
+    ExperimentLoaded(Box<ManagedExperiment>),
     WebhooksLoaded(Vec<WebhookEndpoint>),
     WebhookLoaded(Box<WebhookEndpoint>),
     DeliveriesLoaded(Vec<WebhookDelivery>),
@@ -47,6 +49,8 @@ pub enum Action {
     AiConfigUpdated(Box<ManagedAiConfig>),
     AiConfigDeleted(String),
     AiConfigsInitialized(Vec<ManagedAiConfig>),
+    ExperimentCreated(Box<ManagedExperiment>),
+    ExperimentUpdated(Box<ManagedExperiment>),
     WebhookCreated(Box<WebhookEndpoint>),
     WebhookUpdated(Box<WebhookEndpoint>),
     WebhookDeleted(String),
@@ -73,6 +77,8 @@ pub enum Action {
     SubmitConfigValueUpdate(String), // config key
     SubmitAiConfigCreate,
     SubmitAiConfigUpdate(String), // original file_name
+    SubmitExperimentCreate,
+    SubmitExperimentUpdate(String), // stable key
     SubmitWebhookCreate,
     SubmitWebhookUpdate(String), // original id
 
@@ -135,6 +141,7 @@ pub enum SidebarSection {
     Flags,
     Configs,
     AiConfigs,
+    Experiments,
     Webhooks,
     Environments,
 }
@@ -162,6 +169,10 @@ pub enum View {
     AiConfigDetail(String),
     AiConfigCreate,
     AiConfigEdit(String),
+    ExperimentList,
+    ExperimentDetail(String),
+    ExperimentCreate,
+    ExperimentEdit(String),
     WebhookList,
     WebhookDetail(String),
     WebhookCreate,

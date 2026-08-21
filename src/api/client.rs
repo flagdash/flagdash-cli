@@ -627,6 +627,69 @@ impl ApiClient {
             .await
     }
 
+    // ── Experiments ─────────────────────────────────────────────────
+
+    pub async fn list_experiments(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<ManagedExperiment>, ApiError> {
+        let response: ManagedExperimentsResponse = self
+            .get(&format!(
+                "/manage/experiments?project_id={}",
+                urlencoding(project_id)
+            ))
+            .await?;
+        Ok(response.experiments)
+    }
+
+    pub async fn get_experiment(
+        &self,
+        key: &str,
+        project_id: &str,
+    ) -> Result<ManagedExperiment, ApiError> {
+        let response: ManagedExperimentResponse = self
+            .get(&format!(
+                "/manage/experiments/{}?project_id={}",
+                urlencoding(key),
+                urlencoding(project_id)
+            ))
+            .await?;
+        Ok(response.experiment)
+    }
+
+    pub async fn create_experiment(
+        &self,
+        project_id: &str,
+        request: &CreateExperimentRequest,
+    ) -> Result<ManagedExperiment, ApiError> {
+        let response: ManagedExperimentResponse = self
+            .post(
+                &format!("/manage/experiments?project_id={}", urlencoding(project_id)),
+                Some(request),
+            )
+            .await?;
+        Ok(response.experiment)
+    }
+
+    pub async fn update_experiment(
+        &self,
+        key: &str,
+        project_id: &str,
+        request: &UpdateExperimentRequest,
+    ) -> Result<ManagedExperiment, ApiError> {
+        let response: ManagedExperimentResponse = self
+            .put(
+                &format!(
+                    "/manage/experiments/{}?project_id={}",
+                    urlencoding(key),
+                    urlencoding(project_id)
+                ),
+                request,
+            )
+            .await?;
+        Ok(response.experiment)
+    }
+
     pub async fn regenerate_webhook_secret(&self, id: &str) -> Result<WebhookEndpoint, ApiError> {
         let resp: WebhookEndpointResponse = self
             .post::<(), WebhookEndpointResponse>(

@@ -20,6 +20,9 @@ use crate::views::configs::{
 };
 use crate::views::dashboard::DashboardView;
 use crate::views::environments::list::EnvironmentListView;
+use crate::views::experiments::{
+    detail::ExperimentDetailView, form::ExperimentFormView, list::ExperimentListView,
+};
 use crate::views::flags::{
     detail::FlagDetailView, form::FlagFormView, list::FlagListView, rollout::FlagRolloutView,
     rules::FlagRulesView, schedules::FlagSchedulesView, toggle::FlagToggleView,
@@ -72,6 +75,9 @@ pub struct App {
     pub ai_config_list: AiConfigListView,
     pub ai_config_detail: AiConfigDetailView,
     pub ai_config_form: Option<AiConfigFormView>,
+    pub experiment_list: ExperimentListView,
+    pub experiment_detail: ExperimentDetailView,
+    pub experiment_form: Option<ExperimentFormView>,
     pub webhook_list: WebhookListView,
     pub webhook_detail: WebhookDetailView,
     pub webhook_form: Option<WebhookFormView>,
@@ -131,6 +137,9 @@ impl App {
             ai_config_list: AiConfigListView::new(key_tier.clone()),
             ai_config_detail: AiConfigDetailView::new(key_tier.clone()),
             ai_config_form: None,
+            experiment_list: ExperimentListView::new(key_tier.clone()),
+            experiment_detail: ExperimentDetailView::new(key_tier.clone()),
+            experiment_form: None,
             webhook_list: WebhookListView::new(key_tier.clone()),
             webhook_detail: WebhookDetailView::new(key_tier),
             webhook_form: None,
@@ -195,6 +204,8 @@ impl App {
                             | View::ConfigValueEditor(_)
                             | View::AiConfigCreate
                             | View::AiConfigEdit(_)
+                            | View::ExperimentCreate
+                            | View::ExperimentEdit(_)
                             | View::WebhookCreate
                             | View::WebhookEdit(_)
                     )
@@ -302,6 +313,15 @@ impl App {
                 .ai_config_form
                 .as_mut()
                 .and_then(|f| f.handle_event(event)),
+            View::ExperimentList => self
+                .experiment_list
+                .handle_event(event)
+                .or_else(|| self.sidebar.handle_event(event)),
+            View::ExperimentDetail(_) => self.experiment_detail.handle_event(event),
+            View::ExperimentCreate | View::ExperimentEdit(_) => self
+                .experiment_form
+                .as_mut()
+                .and_then(|form| form.handle_event(event)),
             View::WebhookList => self
                 .webhook_list
                 .handle_event(event)
@@ -361,6 +381,9 @@ impl App {
             Action::FlagsLoaded(flags) => self.flag_list.set_flags(flags),
             Action::ConfigsLoaded(configs) => self.config_list.set_configs(configs),
             Action::AiConfigsLoaded(configs) => self.ai_config_list.set_ai_configs(configs),
+            Action::ExperimentsLoaded(experiments) => {
+                self.experiment_list.set_experiments(experiments)
+            }
             Action::WebhooksLoaded(webhooks) => self.webhook_list.set_webhooks(webhooks),
             Action::EnvironmentsLoaded(envs) => {
                 // Forward environments to sub-views that need them
@@ -395,6 +418,9 @@ impl App {
             }
             Action::AiConfigLoaded(config) => {
                 self.ai_config_detail.config = Some(*config);
+            }
+            Action::ExperimentLoaded(experiment) => {
+                self.experiment_detail.experiment = Some(*experiment);
             }
             Action::WebhookLoaded(webhook) => {
                 self.webhook_detail.webhook = Some(*webhook);
@@ -469,6 +495,8 @@ impl App {
             Action::SubmitConfigValueUpdate(key) => self.submit_config_value_update(key),
             Action::SubmitAiConfigCreate => self.submit_ai_config_create(),
             Action::SubmitAiConfigUpdate(name) => self.submit_ai_config_update(name),
+            Action::SubmitExperimentCreate => self.submit_experiment_create(),
+            Action::SubmitExperimentUpdate(key) => self.submit_experiment_update(key),
             Action::SubmitWebhookCreate => self.submit_webhook_create(),
             Action::SubmitWebhookUpdate(id) => self.submit_webhook_update(id),
             Action::FlagCreated(_) | Action::FlagUpdated(_) => {
@@ -541,6 +569,10 @@ impl App {
             Action::AiConfigDeleted(_) | Action::AiConfigsInitialized(_) => {
                 self.navigate(View::AiConfigList);
             }
+            Action::ExperimentCreated(_) | Action::ExperimentUpdated(_) => {
+                self.experiment_form = None;
+                self.navigate(View::ExperimentList);
+            }
             Action::WebhookCreated(_) | Action::WebhookUpdated(_) => {
                 self.webhook_form = None;
                 self.navigate(View::WebhookList);
@@ -576,6 +608,8 @@ impl App {
             View::ConfigDetail(key) => self.load_config(key.clone()),
             View::AiConfigList => self.load_ai_configs(),
             View::AiConfigDetail(name) => self.load_ai_config(name.clone()),
+            View::ExperimentList => self.load_experiments(),
+            View::ExperimentDetail(key) => self.load_experiment(key.clone()),
             View::WebhookList => self.load_webhooks(),
             View::WebhookDetail(id) => self.load_webhook(id.clone()),
             View::EnvironmentList => self.load_environments(),
@@ -615,6 +649,14 @@ impl App {
                         &self.config.defaults.environment_id,
                         config,
                     ));
+                }
+            }
+            View::ExperimentCreate => {
+                self.experiment_form = Some(ExperimentFormView::new_create());
+            }
+            View::ExperimentEdit(_) => {
+                if let Some(experiment) = &self.experiment_detail.experiment {
+                    self.experiment_form = Some(ExperimentFormView::new_edit(experiment));
                 }
             }
             View::WebhookCreate => {
@@ -683,6 +725,9 @@ impl App {
             View::AiConfigDetail(_) | View::AiConfigCreate | View::AiConfigEdit(_) => {
                 View::AiConfigList
             }
+            View::ExperimentDetail(_) | View::ExperimentCreate | View::ExperimentEdit(_) => {
+                View::ExperimentList
+            }
             View::WebhookDetail(_) | View::WebhookCreate | View::WebhookEdit(_) => {
                 View::WebhookList
             }
@@ -697,6 +742,7 @@ impl App {
             SidebarSection::Flags => View::FlagList,
             SidebarSection::Configs => View::ConfigList,
             SidebarSection::AiConfigs => View::AiConfigList,
+            SidebarSection::Experiments => View::ExperimentList,
             SidebarSection::Webhooks => View::WebhookList,
             SidebarSection::Environments => View::EnvironmentList,
         };
@@ -834,6 +880,8 @@ impl App {
             self.config_detail.key_tier = key_tier.clone();
             self.ai_config_list.key_tier = key_tier.clone();
             self.ai_config_detail.key_tier = key_tier.clone();
+            self.experiment_list.key_tier = key_tier.clone();
+            self.experiment_detail.key_tier = key_tier.clone();
             self.webhook_list.key_tier = key_tier.clone();
             self.webhook_detail.key_tier = key_tier;
 
@@ -1007,6 +1055,8 @@ impl App {
                 | View::ConfigDetail(_)
                 | View::AiConfigList
                 | View::AiConfigDetail(_)
+                | View::ExperimentList
+                | View::ExperimentDetail(_)
                 | View::WebhookList
                 | View::WebhookDetail(_)
                 | View::EnvironmentList
@@ -1017,6 +1067,7 @@ impl App {
         self.flag_list.search.active
             || self.config_list.search.active
             || self.ai_config_list.search.active
+            || self.experiment_list.search.active
     }
 
     fn open_environment_switcher(&mut self) {
@@ -1047,6 +1098,8 @@ impl App {
             View::ConfigDetail(key) => self.load_config(key.clone()),
             View::AiConfigList => self.load_ai_configs(),
             View::AiConfigDetail(name) => self.load_ai_config(name.clone()),
+            View::ExperimentList => self.load_experiments(),
+            View::ExperimentDetail(key) => self.load_experiment(key.clone()),
             View::WebhookList => self.load_webhooks(),
             View::WebhookDetail(id) => self.load_webhook(id.clone()),
             View::EnvironmentList => self.load_environments(),
@@ -1302,6 +1355,40 @@ impl App {
         });
     }
 
+    fn load_experiments(&self) {
+        let Some(api) = &self.api else { return };
+        let api = api.clone();
+        let project_id = self.config.defaults.project_id.clone();
+        let tx = self.action_tx.clone();
+        tokio::spawn(async move {
+            match api.list_experiments(&project_id).await {
+                Ok(experiments) => {
+                    let _ = tx.send(Action::ExperimentsLoaded(experiments));
+                }
+                Err(e) => {
+                    let _ = tx.send(Action::ApiError(e.to_string()));
+                }
+            }
+        });
+    }
+
+    fn load_experiment(&self, key: String) {
+        let Some(api) = &self.api else { return };
+        let api = api.clone();
+        let project_id = self.config.defaults.project_id.clone();
+        let tx = self.action_tx.clone();
+        tokio::spawn(async move {
+            match api.get_experiment(&key, &project_id).await {
+                Ok(experiment) => {
+                    let _ = tx.send(Action::ExperimentLoaded(Box::new(experiment)));
+                }
+                Err(e) => {
+                    let _ = tx.send(Action::ApiError(e.to_string()));
+                }
+            }
+        });
+    }
+
     fn load_webhook(&self, id: String) {
         let Some(api) = &self.api else { return };
         let api = api.clone();
@@ -1520,6 +1607,56 @@ impl App {
                     let _ = tx.send(Action::WebhookCreated(Box::new(webhook)));
                     let _ = tx.send(Action::Toast(ToastMessage {
                         message: "Webhook created".to_string(),
+                        level: ToastLevel::Success,
+                    }));
+                }
+                Err(e) => {
+                    let _ = tx.send(Action::ApiError(e.to_string()));
+                }
+            }
+        });
+    }
+
+    fn submit_experiment_create(&mut self) {
+        let Some(form) = &self.experiment_form else {
+            return;
+        };
+        let Some(api) = &self.api else { return };
+        let request = form.create_request();
+        let api = api.clone();
+        let project_id = self.config.defaults.project_id.clone();
+        let tx = self.action_tx.clone();
+        tokio::spawn(async move {
+            match api.create_experiment(&project_id, &request).await {
+                Ok(experiment) => {
+                    let _ = tx.send(Action::ExperimentCreated(Box::new(experiment)));
+                    let _ = tx.send(Action::Toast(ToastMessage {
+                        message: "Experiment created".to_string(),
+                        level: ToastLevel::Success,
+                    }));
+                }
+                Err(e) => {
+                    let _ = tx.send(Action::ApiError(e.to_string()));
+                }
+            }
+        });
+    }
+
+    fn submit_experiment_update(&mut self, key: String) {
+        let Some(form) = &self.experiment_form else {
+            return;
+        };
+        let Some(api) = &self.api else { return };
+        let request = form.update_request();
+        let api = api.clone();
+        let project_id = self.config.defaults.project_id.clone();
+        let tx = self.action_tx.clone();
+        tokio::spawn(async move {
+            match api.update_experiment(&key, &project_id, &request).await {
+                Ok(experiment) => {
+                    let _ = tx.send(Action::ExperimentUpdated(Box::new(experiment)));
+                    let _ = tx.send(Action::Toast(ToastMessage {
+                        message: "Experiment updated".to_string(),
                         level: ToastLevel::Success,
                     }));
                 }
@@ -1794,6 +1931,13 @@ impl App {
             View::AiConfigCreate | View::AiConfigEdit(_) => {
                 if let Some(f) = &self.ai_config_form {
                     f.render(frame, area);
+                }
+            }
+            View::ExperimentList => self.experiment_list.render(frame, area),
+            View::ExperimentDetail(_) => self.experiment_detail.render(frame, area),
+            View::ExperimentCreate | View::ExperimentEdit(_) => {
+                if let Some(form) = &self.experiment_form {
+                    form.render(frame, area);
                 }
             }
             View::WebhookList => self.webhook_list.render(frame, area),

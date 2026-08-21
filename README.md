@@ -1,6 +1,6 @@
 # FlagDash CLI
 
-Interactive terminal UI for [FlagDash](https://flagdash.io) — manage feature flags, remote configs, AI configs, and webhooks directly from your terminal. Cross-platform, built with Rust and [Ratatui](https://ratatui.rs).
+Interactive terminal UI for [FlagDash](https://flagdash.io) — manage feature flags, experiments, remote configs, AI configs, and webhooks directly from your terminal. Cross-platform, built with Rust and [Ratatui](https://ratatui.rs).
 
 ## Installation
 
@@ -46,9 +46,10 @@ On first run, enter your management API key. It will be saved to `~/.config/flag
 - **Flags** — List, create, edit, delete, toggle per environment, set rollout percentage, manage targeting rules, A/B variations, and schedules
 - **Remote Config** — List, create, edit, delete, set values per environment
 - **AI Configs** — List, create, edit, delete markdown-based AI config files with folder grouping
+- **Experiments** — List, create safe 50/50 drafts, inspect configuration, and record decisions (Premium Plus)
 - **Webhooks** — List, create, edit, delete endpoints, view delivery logs
 - **Environments** — View all environments (read-only)
-- **Search** — Filter flags, configs, and AI configs with `/`
+- **Search** — Filter flags, configs, AI configs, and experiments with `/`
 - **Read-only mode** — Automatically detected for `client_` and `server_` API keys
 
 ## Keyboard Shortcuts
@@ -57,7 +58,7 @@ On first run, enter your management API key. It will be saved to `~/.config/flag
 
 | Key | Action |
 |-----|--------|
-| `1-6` | Switch sidebar sections |
+| `1-7` | Switch sidebar sections |
 | `j/k` or `↑↓` | Navigate lists |
 | `Enter` | Open detail view |
 | `Esc` | Go back |

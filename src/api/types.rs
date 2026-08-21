@@ -194,6 +194,50 @@ pub struct ManagedAiConfigResponse {
     pub ai_config: ManagedAiConfig,
 }
 
+// ── Experiments ─────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedExperiment {
+    pub id: String,
+    pub project_id: String,
+    pub key: String,
+    pub name: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub hypothesis: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub description: String,
+    pub status: String,
+    pub randomization_unit: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub layer_key: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub variants: serde_json::Value,
+    #[serde(default, deserialize_with = "null_default")]
+    pub parameters: serde_json::Value,
+    #[serde(default, deserialize_with = "null_default")]
+    pub metrics: serde_json::Value,
+    #[serde(default)]
+    pub target_exposures: Option<i32>,
+    #[serde(default)]
+    pub target_duration_days: Option<i32>,
+    #[serde(default, deserialize_with = "null_default")]
+    pub decision: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub decision_notes: String,
+    pub inserted_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedExperimentsResponse {
+    pub experiments: Vec<ManagedExperiment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedExperimentResponse {
+    pub experiment: ManagedExperiment,
+}
+
 // ── Webhooks ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -398,6 +442,31 @@ pub struct UpdateAiConfigRequest {
     pub metadata: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub folder: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CreateExperimentRequest {
+    pub key: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub hypothesis: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    pub variants: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateExperimentRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hypothesis: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision_notes: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -1,5 +1,6 @@
 {
-  "name": "@flagdash/cli",
+  "name": "@flagdashio/cli",
+  "publishConfig": { "access": "public" },
   "version": "0.1.0",
   "description": "FlagDash CLI — Interactive terminal UI for feature flag management",
   "license": "MIT",

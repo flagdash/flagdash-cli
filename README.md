@@ -19,7 +19,7 @@ curl -fsSL https://flagdash.io/install.sh | sh
 ### npm
 
 ```sh
-npm install -g @flagdash/cli
+npm install -g @flagdashio/cli
 ```
 
 ### Cargo (build from source)
@@ -177,7 +177,7 @@ The `cli-v*` tag triggers the `cli-release.yml` workflow, which:
 1. **Builds** binaries for 6 targets (linux amd64/arm64, macOS amd64/arm64, Windows amd64/arm64)
 2. **Creates a GitHub Release** with all binaries attached
 3. **Publishes to crates.io** (`cargo publish`)
-4. **Publishes npm wrapper** (`@flagdash/cli` on npmjs.com)
+4. **Publishes npm wrapper** (`@flagdashio/cli` on npmjs.com)
 5. **Updates Homebrew formula** in `flagdash/homebrew-tap`
 
 ### Required Secrets
@@ -185,7 +185,7 @@ The `cli-v*` tag triggers the `cli-release.yml` workflow, which:
 | Secret | Purpose |
 |--------|---------|
 | `CRATES_IO_TOKEN` | Publish to crates.io |
-| `NPM_TOKEN` | Publish `@flagdash/cli` to npm |
+| `NPM_TOKEN` | Publish `@flagdashio/cli` to npm |
 | `SDK_SYNC_TOKEN` | Push to `flagdash/homebrew-tap` repo |
 
 ### Manual / Local Build
@@ -223,7 +223,7 @@ cross build --release --target x86_64-unknown-linux-gnu
 | Channel | How it works |
 |---------|-------------|
 | **Homebrew** | Formula in `flagdash/homebrew-tap` repo, auto-updated by CI on release |
-| **npm** | Wrapper package `@flagdash/cli` runs a postinstall script that downloads the binary |
+| **npm** | Wrapper package `@flagdashio/cli` runs a postinstall script that downloads the binary |
 | **crates.io** | Standard `cargo publish`, users install with `cargo install flagdash-cli` |
 | **Shell script** | `install.sh` detects OS/arch, downloads the binary from GitHub Releases |
 | **GitHub Releases** | Pre-built binaries for all platforms attached to each release |
@@ -236,7 +236,7 @@ cross build --release --target x86_64-unknown-linux-gnu
 
 ### Setting Up npm (First Time)
 
-1. Create the `@flagdash` org on npmjs.com
+1. Create the `@flagdashio` org on npmjs.com
 2. Generate an automation token, save as `NPM_TOKEN` secret
 3. The wrapper package at `sdk/flagdash-cli/dist/npm/` is published by CI
 

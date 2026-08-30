@@ -35,7 +35,7 @@ cargo install flagdash-cli
 flagdash
 
 # Or pass options directly
-flagdash --api-key management_xxx --project-id prj_xxx --environment-id env_xxx
+flagdash --api-key sk_xxx --project-id prj_xxx --environment-id env_xxx
 ```
 
 On first run, enter your management API key. It will be saved to `~/.config/flagdash/config.toml`.
@@ -139,7 +139,7 @@ cargo build
 cargo build --release
 
 # Run
-cargo run -- --api-key management_xxx
+cargo run -- --api-key sk_xxx
 
 # Test
 cargo test

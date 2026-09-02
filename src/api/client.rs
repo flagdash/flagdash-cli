@@ -204,6 +204,156 @@ impl ApiClient {
         self.post_no_auth("/auth/device/token", Some(&body)).await
     }
 
+    // ── OAuth 2.1 device grant (RFC 8628) ────────────────────────────
+    //
+    // These endpoints live at /oauth/*, not under /api/v1, so they bypass
+    // `url/1` and build absolute paths of their own.
+
+    fn oauth_url(&self, path: &str) -> String {
+        format!("{}{}", self.base_url, path)
+    }
+
+    /// The grant_type URN for redeeming a device code.
+    pub const DEVICE_CODE_GRANT: &'static str = "urn:ietf:params:oauth:grant-type:device_code";
+
+    /// POST /oauth/register — register this installation as a public client.
+    ///
+    /// Once per machine: the resulting `client_id` is cached in the config file.
+    /// Registering again works but leaves an orphan client row behind.
+    pub async fn register_oauth_client(
+        &self,
+        client_name: &str,
+    ) -> Result<OAuthRegisterResponse, ApiError> {
+        let body = OAuthRegisterRequest {
+            client_name: client_name.to_string(),
+            redirect_uris: vec![],
+            grant_types: vec![
+                Self::DEVICE_CODE_GRANT.to_string(),
+                "refresh_token".to_string(),
+            ],
+        };
+
+        let resp = self
+            .client
+            .post(self.oauth_url("/oauth/register"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+
+        self.handle_response(resp).await
+    }
+
+    /// POST /oauth/device_authorization — begin the flow.
+    pub async fn request_oauth_device_auth(
+        &self,
+        client_id: &str,
+        scope: Option<&str>,
+        device_name: Option<&str>,
+    ) -> Result<OAuthDeviceAuthResponse, ApiError> {
+        let body = OAuthDeviceAuthRequest {
+            client_id: client_id.to_string(),
+            scope: scope.map(|s| s.to_string()),
+            device_name: device_name.map(|s| s.to_string()),
+        };
+
+        let resp = self
+            .client
+            .post(self.oauth_url("/oauth/device_authorization"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+
+        self.handle_response(resp).await
+    }
+
+    /// POST /oauth/token — poll once for the device code.
+    ///
+    /// Returns an outcome rather than a Result, because "not yet" is the normal
+    /// answer here and is delivered as an HTTP 400. Treating that as an error
+    /// would abort the flow on its first poll.
+    pub async fn poll_oauth_device_token(
+        &self,
+        client_id: &str,
+        device_code: &str,
+    ) -> Result<DevicePollOutcome, ApiError> {
+        let body = OAuthTokenRequest {
+            grant_type: Self::DEVICE_CODE_GRANT.to_string(),
+            client_id: client_id.to_string(),
+            device_code: Some(device_code.to_string()),
+            refresh_token: None,
+        };
+
+        self.oauth_token_request(&body).await
+    }
+
+    /// POST /oauth/token — exchange a refresh token for a new pair.
+    ///
+    /// Rotating: the old refresh token stops working, so the new pair must be
+    /// persisted even when the caller only wanted the access token.
+    pub async fn refresh_oauth_token(
+        &self,
+        client_id: &str,
+        refresh_token: &str,
+    ) -> Result<DevicePollOutcome, ApiError> {
+        let body = OAuthTokenRequest {
+            grant_type: "refresh_token".to_string(),
+            client_id: client_id.to_string(),
+            device_code: None,
+            refresh_token: Some(refresh_token.to_string()),
+        };
+
+        self.oauth_token_request(&body).await
+    }
+
+    async fn oauth_token_request(
+        &self,
+        body: &OAuthTokenRequest,
+    ) -> Result<DevicePollOutcome, ApiError> {
+        let resp = self
+            .client
+            .post(self.oauth_url("/oauth/token"))
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+
+        if status.is_success() {
+            return serde_json::from_str::<OAuthTokenResponse>(&text)
+                .map(DevicePollOutcome::Granted)
+                .map_err(|e| ApiError::Parse(e.to_string()));
+        }
+
+        // A non-2xx here is usually `authorization_pending`, which is the flow
+        // working. Anything unparseable is reported verbatim so a misconfigured
+        // base URL (an HTML error page, say) is diagnosable.
+        match serde_json::from_str::<OAuthErrorResponse>(&text) {
+            Ok(err) => Ok(DevicePollOutcome::from_error(
+                &err.error,
+                &err.error_description,
+            )),
+            Err(_) => Ok(DevicePollOutcome::Failed(format!(
+                "HTTP {status}: {}",
+                text.chars().take(200).collect::<String>()
+            ))),
+        }
+    }
+
+    /// GET /api/v1/auth/me — who this credential belongs to.
+    ///
+    /// An OAuth token response carries no identity, so this is how the CLI learns
+    /// the name, email and role it should display after a device-grant login.
+    pub async fn whoami(&self) -> Result<IdentityResponse, ApiError> {
+        self.get("/auth/me").await
+    }
+
     // ── Flags ────────────────────────────────────────────────────────
 
     pub async fn list_flags(&self, project_id: &str) -> Result<Vec<ManagedFlag>, ApiError> {

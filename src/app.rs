@@ -91,6 +91,10 @@ pub struct App {
     // Stored so it can be aborted on retry/logout/success — otherwise repeated
     // login attempts stack concurrent polling loops that run until expiry.
     pub device_poll_task: Option<tokio::task::JoinHandle<()>>,
+    // Presence doubles as the "a refresh is already in flight" guard: the tick
+    // handler fires every frame, and without it an expired token would spawn a
+    // refresh per tick.
+    pub refresh_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl App {
@@ -98,14 +102,15 @@ impl App {
         let key_tier = config.user_role_tier();
         let (action_tx, action_rx) = mpsc::unbounded_channel();
 
-        let api = if config.has_session_token() {
-            Some(ApiClient::new(
-                &config.connection.base_url,
-                &config.auth.session_token,
-            ))
-        } else {
-            None
-        };
+        // `bearer_token()` returns None when an OAuth access token is present but
+        // expired: the refresh below has to run before any request, and falling
+        // back to a stale session token here would act with wider scopes than the
+        // person most recently granted.
+        let api = config
+            .bearer_token()
+            .map(|token| ApiClient::new(&config.connection.base_url, token));
+
+        let needs_refresh = api.is_none() && !config.auth.refresh_token.is_empty();
 
         let mut app = Self {
             status_bar: StatusBar::new(&config.connection.base_url),
@@ -147,10 +152,20 @@ impl App {
             action_tx,
             action_rx,
             device_poll_task: None,
+            refresh_task: None,
         };
 
+        // An hour of inactivity leaves a live refresh token and a dead access
+        // token, which is the normal resting state — restore it rather than
+        // presenting a login screen to someone who is already signed in.
+        if needs_refresh {
+            app.login_view.set_restoring();
+            app.process_action(Action::OAuthRefreshRequested);
+            return app;
+        }
+
         // Navigate to the correct initial view (triggers data loading)
-        if app.config.has_session_token() {
+        if app.api.is_some() {
             app.status_bar.connected = true;
             app.header.connected = true;
             app.header.project_name = app.config.defaults.project_name.clone();
@@ -170,6 +185,12 @@ impl App {
         // Tick: auto-dismiss toasts
         if matches!(event, Event::Tick) {
             self.toast.tick();
+            // Refresh ahead of expiry rather than discovering it as a 401 on
+            // whatever the person was doing. `can_refresh` also guards against
+            // stacking a second refresh while one is in flight.
+            if self.config.access_token_expired() && self.can_refresh() {
+                self.process_action(Action::OAuthRefreshRequested);
+            }
             return Ok(());
         }
 
@@ -364,11 +385,22 @@ impl App {
                 self.pending_confirm = None;
             }
             Action::BrowserLoginRequested => self.handle_browser_login_requested(),
-            Action::DeviceAuthReceived(device_auth) => {
-                self.handle_device_auth_received(*device_auth);
+            Action::OAuthClientRegistered(client_id) => {
+                self.config.auth.client_id = client_id;
+                let _ = self.config.save();
             }
-            Action::DeviceTokenPollResult(response) => {
-                self.handle_device_token_poll_result(*response);
+            Action::OAuthDeviceAuthReceived(device_auth) => {
+                self.handle_oauth_device_auth_received(*device_auth);
+            }
+            Action::OAuthDevicePollResult(outcome) => {
+                self.handle_oauth_device_poll_result(*outcome);
+            }
+            Action::IdentityResolved(identity) => {
+                self.handle_identity_resolved(*identity);
+            }
+            Action::OAuthRefreshRequested => self.handle_oauth_refresh_requested(),
+            Action::OAuthRefreshResult(outcome) => {
+                self.handle_oauth_refresh_result(*outcome);
             }
             Action::LoginSuccess => {
                 self.project_picker.set_saved_defaults(
@@ -584,10 +616,19 @@ impl App {
                 self.webhook_detail.webhook = Some(*webhook);
             }
             Action::ApiError(ref msg) => {
-                if matches!(self.current_view, View::Login) {
-                    self.login_view.set_error(msg);
+                // A 401 mid-session usually means the access token lapsed between
+                // the expiry check and the request. Refreshing beats telling
+                // someone who is signed in that they are not.
+                if msg.contains("Unauthorized") && self.can_refresh() {
+                    self.process_action(Action::OAuthRefreshRequested);
+                    self.toast
+                        .show("Refreshing your session…".to_string(), ToastLevel::Info);
+                } else {
+                    if matches!(self.current_view, View::Login) {
+                        self.login_view.set_error(msg);
+                    }
+                    self.toast.show(msg.clone(), ToastLevel::Error);
                 }
-                self.toast.show(msg.clone(), ToastLevel::Error);
             }
             Action::SetLoading(loading) => {
                 self.status_bar.loading = loading;
@@ -749,45 +790,101 @@ impl App {
         self.navigate(view);
     }
 
+    /// Begin an OAuth 2.1 device-grant login (RFC 8628).
+    ///
+    /// Two round trips before anything is shown: this installation registers
+    /// itself as a public client the first time (RFC 7591, cached in the config
+    /// thereafter), then asks for a device code. Registering per-login instead
+    /// would leave an orphan client row behind on every sign-in.
     fn handle_browser_login_requested(&mut self) {
         let base_url = self.config.connection.base_url.clone();
+        let existing_client_id = self.config.auth.client_id.clone();
         let tx = self.action_tx.clone();
-        let hostname = std::env::var("HOSTNAME")
-            .or_else(|_| std::env::var("COMPUTERNAME"))
-            .unwrap_or_else(|_| "FlagDash CLI".to_string());
+        let hostname = Self::device_name();
 
         tokio::spawn(async move {
             let client = ApiClient::new_unauthenticated(&base_url);
-            match client.request_device_auth(Some(&hostname)).await {
+
+            let client_id =
+                match Self::ensure_client_id(&client, existing_client_id, &hostname).await {
+                    Ok(id) => id,
+                    Err(e) => {
+                        let _ = tx.send(Action::ApiError(Self::login_error_message(&base_url, &e)));
+                        return;
+                    }
+                };
+
+            match client
+                .request_oauth_device_auth(&client_id, None, Some(&hostname))
+                .await
+            {
                 Ok(resp) => {
-                    let _ = tx.send(Action::DeviceAuthReceived(Box::new(resp)));
+                    // The client_id is carried on the response path so the poll
+                    // loop and the config write both use the one that was
+                    // actually registered, rather than re-reading state that a
+                    // concurrent login may have changed.
+                    let _ = tx.send(Action::OAuthClientRegistered(client_id));
+                    let _ = tx.send(Action::OAuthDeviceAuthReceived(Box::new(resp)));
                 }
                 Err(e) => {
-                    let msg = if e.to_string().contains("Network")
-                        || e.to_string().contains("error sending request")
-                    {
-                        format!("Unable to connect to {}. Is the server running?", base_url)
-                    } else {
-                        format!("Failed to start login: {}", e)
-                    };
-                    let _ = tx.send(Action::ApiError(msg));
+                    let _ = tx.send(Action::ApiError(Self::login_error_message(&base_url, &e)));
                 }
             }
         });
     }
 
-    fn handle_device_auth_received(&mut self, device_auth: crate::api::types::DeviceAuthResponse) {
-        // Update the login view
-        self.login_view.set_waiting(&device_auth);
+    /// The name shown on the approval page and in the sessions list.
+    fn device_name() -> String {
+        std::env::var("HOSTNAME")
+            .or_else(|_| std::env::var("COMPUTERNAME"))
+            .unwrap_or_else(|_| "FlagDash CLI".to_string())
+    }
 
-        // Open the browser
-        let _ = open::that(&device_auth.verification_url);
+    async fn ensure_client_id(
+        client: &ApiClient,
+        existing: String,
+        hostname: &str,
+    ) -> Result<String, crate::api::error::ApiError> {
+        if !existing.is_empty() {
+            return Ok(existing);
+        }
 
-        // Start polling for the token
+        let registered = client
+            .register_oauth_client(&format!("FlagDash CLI ({hostname})"))
+            .await?;
+
+        Ok(registered.client_id)
+    }
+
+    fn login_error_message(base_url: &str, e: &crate::api::error::ApiError) -> String {
+        let text = e.to_string();
+
+        if text.contains("Network") || text.contains("error sending request") {
+            format!("Unable to connect to {base_url}. Is the server running?")
+        } else {
+            format!("Failed to start login: {text}")
+        }
+    }
+
+    fn handle_oauth_device_auth_received(
+        &mut self,
+        device_auth: crate::api::types::OAuthDeviceAuthResponse,
+    ) {
+        self.login_view.set_waiting_oauth(&device_auth);
+
+        // Prefer the prefilled URL so the person does not retype the code; the
+        // approval page still shows it for them to compare against this screen,
+        // which is the whole security property of RFC 8628.
+        let target = device_auth
+            .verification_uri_complete
+            .clone()
+            .unwrap_or_else(|| device_auth.verification_uri.clone());
+        let _ = open::that(&target);
+
         let base_url = self.config.connection.base_url.clone();
+        let client_id = self.config.auth.client_id.clone();
         let device_code = device_auth.device_code.clone();
-        let interval = device_auth.interval;
-        let expires_in = device_auth.expires_in;
+        let expires_in = device_auth.expires_in.max(0) as u64;
         let tx = self.action_tx.clone();
 
         // Abort any previous polling loop before starting a new one, so repeated
@@ -796,40 +893,50 @@ impl App {
 
         let handle = tokio::spawn(async move {
             let client = ApiClient::new_unauthenticated(&base_url);
-            let max_polls = expires_in / interval.max(1);
-            let sleep_duration = std::time::Duration::from_secs(interval.max(2));
 
-            for _ in 0..max_polls {
-                tokio::time::sleep(sleep_duration).await;
-                match client.poll_device_token(&device_code).await {
-                    Ok(resp) => {
-                        let _ = tx.send(Action::DeviceTokenPollResult(Box::new(resp.clone())));
-                        // If we got a token or a terminal error, stop polling
-                        if resp.session_token.is_some() {
-                            return;
+            // The server advertises the minimum gap between polls and answers
+            // `slow_down` to anything faster. Backing off on that rather than
+            // ignoring it is what keeps a login from rate-limiting itself.
+            let mut interval = device_auth.interval.max(1);
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(expires_in);
+
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+
+                if tokio::time::Instant::now() >= deadline {
+                    let _ = tx.send(Action::OAuthDevicePollResult(Box::new(
+                        crate::api::types::DevicePollOutcome::Expired,
+                    )));
+                    return;
+                }
+
+                match client
+                    .poll_oauth_device_token(&client_id, &device_code)
+                    .await
+                {
+                    Ok(outcome) => {
+                        let keep_going = outcome.keep_polling();
+
+                        if matches!(outcome, crate::api::types::DevicePollOutcome::SlowDown) {
+                            interval += 5;
                         }
-                        if let Some(err) = &resp.error {
-                            if err != "authorization_pending" && err != "slow_down" {
-                                return;
-                            }
+
+                        // Pending is the flow working, and reporting it on every
+                        // tick would repaint the view for no reason.
+                        if !matches!(outcome, crate::api::types::DevicePollOutcome::Pending) {
+                            let _ = tx.send(Action::OAuthDevicePollResult(Box::new(outcome)));
+                        }
+
+                        if !keep_going {
+                            return;
                         }
                     }
                     Err(e) => {
-                        let _ = tx.send(Action::ApiError(format!("Poll error: {}", e)));
+                        let _ = tx.send(Action::ApiError(format!("Poll error: {e}")));
                         return;
                     }
                 }
             }
-            // Expired
-            let _ = tx.send(Action::DeviceTokenPollResult(Box::new(
-                crate::api::types::DeviceTokenResponse {
-                    session_token: None,
-                    account: None,
-                    user: None,
-                    expires_at: None,
-                    error: Some("expired_token".to_string()),
-                },
-            )));
         });
 
         self.device_poll_task = Some(handle);
@@ -842,73 +949,194 @@ impl App {
         }
     }
 
-    fn handle_device_token_poll_result(
-        &mut self,
-        response: crate::api::types::DeviceTokenResponse,
-    ) {
-        if let Some(token) = response.session_token {
-            // Success! The polling loop has already returned on its side, but
-            // drop our handle so we don't hold a finished task around.
-            self.abort_device_poll();
+    fn handle_oauth_device_poll_result(&mut self, outcome: crate::api::types::DevicePollOutcome) {
+        use crate::api::types::DevicePollOutcome as Outcome;
 
-            // Store the session token and user info
-            self.config.auth.session_token = token;
+        match outcome {
+            Outcome::Granted(tokens) => {
+                // The loop has already returned on its side; drop the handle so a
+                // finished task is not held.
+                self.abort_device_poll();
 
-            if let Some(user) = &response.user {
-                self.config.auth.user_name = user.name.clone();
-                self.config.auth.user_email = user.email.clone();
-                self.config.auth.user_role = user.role.clone();
+                self.config.set_oauth_tokens(
+                    tokens.access_token,
+                    tokens.refresh_token,
+                    tokens.expires_in,
+                    tokens.scope,
+                );
+                let _ = self.config.save();
+
+                self.rebuild_api_client();
+
+                // An OAuth token response carries no identity, so who this is has
+                // to be asked for separately before the UI can name them.
+                self.request_identity();
             }
 
-            if let Some(expires_at) = &response.expires_at {
-                self.config.auth.token_expires_at = expires_at.clone();
+            // Pending never reaches here — the poll loop swallows it — but a
+            // SlowDown is worth surfacing so a stalled login is explicable.
+            Outcome::Pending | Outcome::SlowDown => {}
+
+            Outcome::Expired => {
+                self.login_view
+                    .set_error("Login expired. Press Enter to try again.");
             }
 
-            let _ = self.config.save();
+            Outcome::Denied => {
+                self.login_view
+                    .set_error("Login denied. Press Enter to try again.");
+            }
 
-            // Set up the API client with the new session token
-            self.api = Some(ApiClient::new(
-                &self.config.connection.base_url,
-                &self.config.auth.session_token,
-            ));
-
-            // Update key tier for views
-            let key_tier = self.config.user_role_tier();
-            self.flag_list.key_tier = key_tier.clone();
-            self.flag_detail.key_tier = key_tier.clone();
-            self.config_list.key_tier = key_tier.clone();
-            self.config_detail.key_tier = key_tier.clone();
-            self.ai_config_list.key_tier = key_tier.clone();
-            self.ai_config_detail.key_tier = key_tier.clone();
-            self.experiment_list.key_tier = key_tier.clone();
-            self.experiment_detail.key_tier = key_tier.clone();
-            self.webhook_list.key_tier = key_tier.clone();
-            self.webhook_detail.key_tier = key_tier;
-
-            self.status_bar.connected = true;
-            self.header.connected = true;
-            self.login_view.set_success();
-
-            self.process_action(Action::LoginSuccess);
-        } else if let Some(err) = &response.error {
-            match err.as_str() {
-                "authorization_pending" | "slow_down" => {
-                    // Still waiting, do nothing (polling continues)
-                }
-                "expired_token" => {
-                    self.login_view
-                        .set_error("Login expired. Press Enter to try again.");
-                }
-                "access_denied" => {
-                    self.login_view
-                        .set_error("Login denied. Press Enter to try again.");
-                }
-                _ => {
-                    self.login_view
-                        .set_error(&format!("Login error: {}. Press Enter to retry.", err));
-                }
+            Outcome::Failed(reason) => {
+                self.login_view
+                    .set_error(&format!("Login error: {reason}. Press Enter to retry."));
             }
         }
+    }
+
+    /// Whether a refresh is possible and not already running.
+    fn can_refresh(&self) -> bool {
+        !self.config.auth.refresh_token.is_empty()
+            && !self.config.auth.client_id.is_empty()
+            && self.refresh_task.is_none()
+    }
+
+    /// Exchange the refresh token for a new pair.
+    ///
+    /// The refresh token rotates, so the response has to be persisted even though
+    /// only the access token was wanted — dropping the new refresh token would
+    /// strand the session at the next expiry.
+    fn handle_oauth_refresh_requested(&mut self) {
+        if !self.can_refresh() {
+            return;
+        }
+
+        let base_url = self.config.connection.base_url.clone();
+        let client_id = self.config.auth.client_id.clone();
+        let refresh_token = self.config.auth.refresh_token.clone();
+        let tx = self.action_tx.clone();
+
+        let handle = tokio::spawn(async move {
+            let client = ApiClient::new_unauthenticated(&base_url);
+
+            match client.refresh_oauth_token(&client_id, &refresh_token).await {
+                Ok(outcome) => {
+                    let _ = tx.send(Action::OAuthRefreshResult(Box::new(outcome)));
+                }
+                Err(e) => {
+                    let _ = tx.send(Action::OAuthRefreshResult(Box::new(
+                        crate::api::types::DevicePollOutcome::Failed(e.to_string()),
+                    )));
+                }
+            }
+        });
+
+        self.refresh_task = Some(handle);
+    }
+
+    fn handle_oauth_refresh_result(&mut self, outcome: crate::api::types::DevicePollOutcome) {
+        self.refresh_task = None;
+
+        match outcome {
+            crate::api::types::DevicePollOutcome::Granted(tokens) => {
+                self.config.set_oauth_tokens(
+                    tokens.access_token,
+                    tokens.refresh_token,
+                    tokens.expires_in,
+                    tokens.scope,
+                );
+                let _ = self.config.save();
+                self.rebuild_api_client();
+                self.request_identity();
+            }
+
+            // A refresh token is only refused when it is revoked, rotated away, or
+            // 30 days old. None of those are recoverable without the person, so
+            // the credential is cleared rather than retried into a loop.
+            other => {
+                self.config.clear_auth();
+                let _ = self.config.save();
+                self.api = None;
+                self.status_bar.connected = false;
+                self.header.connected = false;
+                self.current_view = View::Login;
+                self.login_view.set_error(&format!(
+                    "Your session ended ({other:?}). Press Enter to sign in."
+                ));
+            }
+        }
+    }
+
+    /// Ask the server who the current credential belongs to.
+    fn request_identity(&mut self) {
+        let Some(api) = self.api.clone() else { return };
+        let tx = self.action_tx.clone();
+
+        tokio::spawn(async move {
+            match api.whoami().await {
+                Ok(identity) => {
+                    let _ = tx.send(Action::IdentityResolved(Box::new(identity)));
+                }
+                Err(e) => {
+                    let _ = tx.send(Action::ApiError(format!(
+                        "Signed in, but could not read your profile: {e}"
+                    )));
+                }
+            }
+        });
+    }
+
+    fn handle_identity_resolved(&mut self, identity: crate::api::types::IdentityResponse) {
+        if let Some(user) = &identity.user {
+            self.config.auth.user_name = user.name.clone();
+            self.config.auth.user_email = user.email.clone();
+            self.config.auth.user_role = user.role.clone();
+        }
+
+        if let Some(credential) = &identity.credential {
+            // What the *token* may do, which can be narrower than the role. The
+            // server enforces it either way; carrying it lets the UI say so.
+            self.config.auth.scope = credential.scope.clone();
+        }
+
+        let _ = self.config.save();
+
+        self.apply_key_tier();
+
+        self.status_bar.connected = true;
+        self.header.connected = true;
+        self.login_view.set_success();
+
+        self.process_action(Action::LoginSuccess);
+    }
+
+    /// Point the API client at whichever credential is current.
+    fn rebuild_api_client(&mut self) {
+        match self.config.bearer_token() {
+            Some(token) => {
+                self.api = Some(ApiClient::new(&self.config.connection.base_url, token));
+            }
+            None => self.api = None,
+        }
+    }
+
+    /// Push the current credential's tier into every view that gates on it.
+    ///
+    /// One place rather than nineteen assignments at each call site: a view added
+    /// later and missed here shows the wrong affordances, and nothing fails.
+    fn apply_key_tier(&mut self) {
+        let key_tier = self.config.user_role_tier();
+
+        self.flag_list.key_tier = key_tier.clone();
+        self.flag_detail.key_tier = key_tier.clone();
+        self.config_list.key_tier = key_tier.clone();
+        self.config_detail.key_tier = key_tier.clone();
+        self.ai_config_list.key_tier = key_tier.clone();
+        self.ai_config_detail.key_tier = key_tier.clone();
+        self.experiment_list.key_tier = key_tier.clone();
+        self.experiment_detail.key_tier = key_tier.clone();
+        self.webhook_list.key_tier = key_tier.clone();
+        self.webhook_detail.key_tier = key_tier;
     }
 
     fn handle_logout(&mut self) {

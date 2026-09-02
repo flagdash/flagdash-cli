@@ -84,8 +84,22 @@ pub enum Action {
 
     // Login / Auth
     BrowserLoginRequested,
-    DeviceAuthReceived(Box<DeviceAuthResponse>),
-    DeviceTokenPollResult(Box<DeviceTokenResponse>),
+
+    // OAuth 2.1 device grant (RFC 8628) — how `flagdash login` works.
+    //
+    // This replaced a bespoke device flow that issued unscoped `session_*`
+    // tokens. A config still holding one of those keeps working (it is sent as a
+    // bearer token like any other), but nothing mints them here any more.
+    /// The client_id this installation registered as, to be cached in config.
+    OAuthClientRegistered(String),
+    OAuthDeviceAuthReceived(Box<OAuthDeviceAuthResponse>),
+    OAuthDevicePollResult(Box<DevicePollOutcome>),
+    /// Identity resolved after a login or a refresh, since an OAuth token
+    /// response carries none.
+    IdentityResolved(Box<IdentityResponse>),
+    /// Exchange the refresh token for a new pair.
+    OAuthRefreshRequested,
+    OAuthRefreshResult(Box<DevicePollOutcome>),
     LoginSuccess,
     Logout,
 

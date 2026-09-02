@@ -14,6 +14,11 @@ pub struct AppConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AuthConfig {
+    /// Device-flow session token (`session_*`). The original CLI credential.
+    ///
+    /// Superseded by the OAuth fields below but still honoured: it is what
+    /// `FLAGDASH_SESSION_TOKEN` sets, what a already-logged-in config holds, and
+    /// what CI uses when it cannot open a browser.
     #[serde(default)]
     pub session_token: String,
     #[serde(default)]
@@ -24,6 +29,30 @@ pub struct AuthConfig {
     pub user_role: String,
     #[serde(default)]
     pub token_expires_at: String,
+
+    /// OAuth 2.1 access token (`mcp_at_*`), obtained through the device grant.
+    ///
+    /// Short-lived — one hour — and refreshed silently, which is why the refresh
+    /// token and expiry sit beside it. A blank access token with a live refresh
+    /// token is the normal resting state after an hour of inactivity.
+    #[serde(default)]
+    pub access_token: String,
+    #[serde(default)]
+    pub refresh_token: String,
+    /// RFC 3339. Compared before every request so a known-expired token is
+    /// refreshed proactively instead of costing a 401 round trip first.
+    #[serde(default)]
+    pub access_expires_at: String,
+    /// The dynamically registered client this device authenticates as.
+    ///
+    /// Registration is once per machine (RFC 7591), so this is cached: losing it
+    /// means registering again, which works but leaves an orphan client behind.
+    #[serde(default)]
+    pub client_id: String,
+    /// Space-separated scopes the person actually granted.
+    #[serde(default)]
+    pub scope: String,
+
     /// Legacy field: kept for backwards compatibility with existing config files.
     /// If present and session_token is empty, it will be used as a fallback.
     #[serde(default, skip_serializing)]
@@ -81,6 +110,14 @@ impl AppConfig {
             config.auth.session_token = token;
         } else if let Ok(key) = std::env::var("FLAGDASH_API_KEY") {
             config.auth.session_token = key;
+        }
+        // An access token supplied by the environment is used as-is and never
+        // refreshed: whoever exported it owns its lifecycle, and writing a
+        // refreshed value back to disk would be a surprising side effect.
+        if let Ok(token) = std::env::var("FLAGDASH_ACCESS_TOKEN") {
+            config.auth.access_token = token;
+            config.auth.refresh_token.clear();
+            config.auth.access_expires_at.clear();
         }
         if let Ok(url) = std::env::var("FLAGDASH_BASE_URL") {
             config.connection.base_url = url;
@@ -141,14 +178,88 @@ impl AppConfig {
         Ok(())
     }
 
-    /// Returns true if we have a session token configured.
+    /// Returns true if we have any credential configured.
+    ///
+    /// Named for the field it originally checked; it now answers the broader
+    /// question every caller actually meant, so an OAuth-only login is not
+    /// mistaken for being signed out.
     pub fn has_session_token(&self) -> bool {
-        !self.auth.session_token.is_empty()
+        !self.auth.session_token.is_empty() || self.has_oauth_token()
     }
 
-    /// Detect the key/auth tier from the session token or legacy API key prefix.
+    /// Whether an OAuth credential is present — either a usable access token or
+    /// a refresh token that can mint one.
+    pub fn has_oauth_token(&self) -> bool {
+        !self.auth.access_token.is_empty() || !self.auth.refresh_token.is_empty()
+    }
+
+    /// The bearer token to send, preferring OAuth over the older session token.
+    ///
+    /// Returns `None` when the access token is absent or expired and a refresh is
+    /// required first — callers must not fall back to the session token in that
+    /// case, or a stale login would silently act with different scopes than the
+    /// one the person most recently granted.
+    pub fn bearer_token(&self) -> Option<&str> {
+        if !self.auth.access_token.is_empty() && !self.access_token_expired() {
+            Some(&self.auth.access_token)
+        } else if self.auth.access_token.is_empty()
+            && self.auth.refresh_token.is_empty()
+            && !self.auth.session_token.is_empty()
+        {
+            Some(&self.auth.session_token)
+        } else {
+            None
+        }
+    }
+
+    /// Whether the access token is past (or within a minute of) its expiry.
+    ///
+    /// The minute of slack matters: a token that expires mid-flight fails the
+    /// request rather than the check, and a retry loop around a 401 is a worse
+    /// place to discover it than a proactive refresh.
+    pub fn access_token_expired(&self) -> bool {
+        if self.auth.access_expires_at.is_empty() {
+            // No recorded expiry means the token came from the environment, where
+            // its lifecycle is not ours to manage. Treat it as usable.
+            return false;
+        }
+
+        match chrono::DateTime::parse_from_rfc3339(&self.auth.access_expires_at) {
+            Ok(expires_at) => {
+                chrono::Utc::now() + chrono::Duration::seconds(60)
+                    >= expires_at.with_timezone(&chrono::Utc)
+            }
+            // An unparseable timestamp is treated as expired: refreshing costs one
+            // request, while trusting it costs every request until someone notices.
+            Err(_) => true,
+        }
+    }
+
+    /// Record a freshly issued OAuth token pair.
+    pub fn set_oauth_tokens(
+        &mut self,
+        access_token: String,
+        refresh_token: String,
+        expires_in: i64,
+        scope: String,
+    ) {
+        self.auth.access_token = access_token;
+        self.auth.refresh_token = refresh_token;
+        self.auth.scope = scope;
+        self.auth.access_expires_at = (chrono::Utc::now() + chrono::Duration::seconds(expires_in))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        // An OAuth login supersedes any older session token, which would
+        // otherwise linger with wider scopes than the person just granted.
+        self.auth.session_token.clear();
+    }
+
+    /// Detect the key/auth tier from whichever credential is in use.
     pub fn key_tier(&self) -> KeyTier {
-        KeyTier::from_key(&self.auth.session_token)
+        if self.has_oauth_token() {
+            KeyTier::OAuth
+        } else {
+            KeyTier::from_key(&self.auth.session_token)
+        }
     }
 
     /// Detect the key/auth tier from the user role stored in config.
@@ -168,6 +279,13 @@ impl AppConfig {
         self.auth.user_role.clear();
         self.auth.token_expires_at.clear();
         self.auth.api_key.clear();
+        self.auth.access_token.clear();
+        self.auth.refresh_token.clear();
+        self.auth.access_expires_at.clear();
+        self.auth.scope.clear();
+        // `client_id` deliberately survives a logout: it identifies this
+        // installation, not the person, and re-registering on every sign-in
+        // would leave an orphan client row behind each time.
     }
 }
 
@@ -177,6 +295,10 @@ pub enum KeyTier {
     Server,
     Client,
     Session,
+    /// A token from the OAuth device grant. What it may do is decided by the
+    /// scopes the person granted, which the server enforces — so it is treated
+    /// as mutating here and refused server-side if the grant was read-only.
+    OAuth,
     Unknown,
 }
 
@@ -190,6 +312,8 @@ impl KeyTier {
             KeyTier::Client
         } else if key.starts_with("session_") {
             KeyTier::Session
+        } else if key.starts_with("mcp_at_") {
+            KeyTier::OAuth
         } else {
             KeyTier::Unknown
         }
@@ -210,12 +334,16 @@ impl KeyTier {
             KeyTier::Server => "server",
             KeyTier::Client => "client",
             KeyTier::Session => "session",
+            KeyTier::OAuth => "oauth",
             KeyTier::Unknown => "unknown",
         }
     }
 
     pub fn can_mutate(&self) -> bool {
-        matches!(self, KeyTier::Management | KeyTier::Session)
+        matches!(
+            self,
+            KeyTier::Management | KeyTier::Session | KeyTier::OAuth
+        )
     }
 }
 
@@ -375,5 +503,157 @@ mod tests {
         assert!(config.auth.user_email.is_empty());
         assert!(config.auth.user_role.is_empty());
         assert!(config.auth.token_expires_at.is_empty());
+    }
+
+    // ── OAuth device-grant credentials ───────────────────────────────
+    //
+    // The expiry logic here decides whether every request carries a live token
+    // or a dead one, and it is the kind of thing that fails silently: a token
+    // treated as valid past its expiry produces 401s on unrelated screens.
+
+    fn oauth_config(expires_in_secs: i64) -> AppConfig {
+        let mut config = AppConfig::default();
+        config.set_oauth_tokens(
+            "mcp_at_abc".to_string(),
+            "mcp_rt_def".to_string(),
+            expires_in_secs,
+            "mcp:read mcp:write".to_string(),
+        );
+        config
+    }
+
+    #[test]
+    fn set_oauth_tokens_records_an_absolute_expiry() {
+        let config = oauth_config(3600);
+
+        assert_eq!(config.auth.access_token, "mcp_at_abc");
+        assert_eq!(config.auth.refresh_token, "mcp_rt_def");
+        assert_eq!(config.auth.scope, "mcp:read mcp:write");
+        assert!(!config.auth.access_expires_at.is_empty());
+        assert!(!config.access_token_expired());
+    }
+
+    #[test]
+    fn an_oauth_login_clears_any_older_session_token() {
+        // Otherwise a session token from a previous login lingers with wider
+        // scopes than the person just granted.
+        let mut config = AppConfig::default();
+        config.auth.session_token = "session_old".to_string();
+
+        config.set_oauth_tokens(
+            "mcp_at_new".to_string(),
+            "mcp_rt_new".to_string(),
+            3600,
+            String::new(),
+        );
+
+        assert!(config.auth.session_token.is_empty());
+    }
+
+    #[test]
+    fn a_token_inside_the_expiry_slack_counts_as_expired() {
+        // 30 seconds left is not enough: a token that expires mid-flight fails
+        // the request rather than the check.
+        let config = oauth_config(30);
+        assert!(config.access_token_expired());
+    }
+
+    #[test]
+    fn a_past_expiry_counts_as_expired() {
+        let config = oauth_config(-10);
+        assert!(config.access_token_expired());
+    }
+
+    #[test]
+    fn an_unparseable_expiry_counts_as_expired() {
+        // Refreshing costs one request; trusting it costs every request until
+        // somebody notices.
+        let mut config = oauth_config(3600);
+        config.auth.access_expires_at = "not a timestamp".to_string();
+        assert!(config.access_token_expired());
+    }
+
+    #[test]
+    fn a_token_with_no_recorded_expiry_is_usable() {
+        // That is the environment-supplied case, where the lifecycle is not ours.
+        let mut config = AppConfig::default();
+        config.auth.access_token = "mcp_at_from_env".to_string();
+
+        assert!(!config.access_token_expired());
+        assert_eq!(config.bearer_token(), Some("mcp_at_from_env"));
+    }
+
+    #[test]
+    fn bearer_token_prefers_oauth_over_a_session_token() {
+        let mut config = oauth_config(3600);
+        config.auth.session_token = "session_old".to_string();
+
+        assert_eq!(config.bearer_token(), Some("mcp_at_abc"));
+    }
+
+    #[test]
+    fn bearer_token_withholds_an_expired_access_token() {
+        // Returning the session token here would silently act with different
+        // scopes than the OAuth grant the person most recently approved.
+        let mut config = oauth_config(-10);
+        config.auth.session_token = "session_old".to_string();
+
+        assert_eq!(config.bearer_token(), None);
+    }
+
+    #[test]
+    fn bearer_token_falls_back_to_a_session_token_when_there_is_no_oauth_login() {
+        let mut config = AppConfig::default();
+        config.auth.session_token = "session_only".to_string();
+
+        assert_eq!(config.bearer_token(), Some("session_only"));
+        assert!(config.has_session_token());
+        assert!(!config.has_oauth_token());
+    }
+
+    #[test]
+    fn an_oauth_login_counts_as_signed_in() {
+        let config = oauth_config(3600);
+
+        assert!(config.has_session_token());
+        assert!(config.has_oauth_token());
+        assert_eq!(config.key_tier(), KeyTier::OAuth);
+    }
+
+    #[test]
+    fn a_refresh_token_alone_still_counts_as_signed_in() {
+        // The resting state after an hour idle: the access token is gone, the
+        // refresh token restores it. Reporting "signed out" here would present a
+        // login screen to someone who is signed in.
+        let mut config = AppConfig::default();
+        config.auth.refresh_token = "mcp_rt_only".to_string();
+
+        assert!(config.has_oauth_token());
+        assert!(config.has_session_token());
+        // ...but there is nothing to send until it is refreshed.
+        assert_eq!(config.bearer_token(), None);
+    }
+
+    #[test]
+    fn clear_auth_drops_oauth_credentials_but_keeps_the_client_id() {
+        let mut config = oauth_config(3600);
+        config.auth.client_id = "installation-client".to_string();
+
+        config.clear_auth();
+
+        assert!(config.auth.access_token.is_empty());
+        assert!(config.auth.refresh_token.is_empty());
+        assert!(config.auth.access_expires_at.is_empty());
+        assert!(config.auth.scope.is_empty());
+        // The client_id identifies the installation, not the person — losing it
+        // means re-registering and leaving an orphan client behind.
+        assert_eq!(config.auth.client_id, "installation-client");
+    }
+
+    #[test]
+    fn an_oauth_access_token_is_recognised_by_prefix() {
+        assert_eq!(KeyTier::from_key("mcp_at_abc123"), KeyTier::OAuth);
+        assert!(KeyTier::OAuth.can_mutate());
+        assert_eq!(KeyTier::OAuth.label(), "oauth");
     }
 }

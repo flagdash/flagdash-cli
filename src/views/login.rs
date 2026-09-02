@@ -1,5 +1,5 @@
 use crate::action::Action;
-use crate::api::types::DeviceAuthResponse;
+use crate::api::types::OAuthDeviceAuthResponse;
 use crate::event::Event;
 use crate::theme;
 use crossterm::event::{KeyCode, KeyEventKind};
@@ -11,6 +11,10 @@ use ratatui::Frame;
 #[derive(Debug, Clone, PartialEq)]
 enum LoginState {
     Idle,
+    /// An existing session is being restored from a refresh token. Shown instead
+    /// of the sign-in prompt, which would tell someone who *is* signed in that
+    /// they are not.
+    Restoring,
     WaitingForBrowser {
         user_code: String,
         verification_url: String,
@@ -36,11 +40,21 @@ impl LoginView {
         self.state = LoginState::Error(msg.to_string());
     }
 
-    pub fn set_waiting(&mut self, device_auth: &DeviceAuthResponse) {
+    /// Show the code and the URL for an OAuth device-grant login.
+    ///
+    /// Deliberately the plain `verification_uri`, not the prefilled variant: the
+    /// prefilled one is opened in the browser for convenience, but what is shown
+    /// here is what a person types by hand, and they should then confirm the code
+    /// against this screen rather than trust a link.
+    pub fn set_waiting_oauth(&mut self, device_auth: &OAuthDeviceAuthResponse) {
         self.state = LoginState::WaitingForBrowser {
             user_code: device_auth.user_code.clone(),
-            verification_url: device_auth.verification_url.clone(),
+            verification_url: device_auth.verification_uri.clone(),
         };
+    }
+
+    pub fn set_restoring(&mut self) {
+        self.state = LoginState::Restoring;
     }
 
     pub fn set_success(&mut self) {
@@ -77,6 +91,14 @@ impl LoginView {
                         return None;
                     }
                 }
+                // Restoring resolves on its own within a request or two. Esc
+                // abandons it and offers a fresh sign-in instead of hanging.
+                LoginState::Restoring => {
+                    if key.code == KeyCode::Esc {
+                        self.state = LoginState::Idle;
+                        return None;
+                    }
+                }
                 LoginState::Error(_) => {
                     if key.code == KeyCode::Enter {
                         self.state = LoginState::Idle;
@@ -102,9 +124,39 @@ impl LoginView {
                 user_code,
                 verification_url,
             } => self.render_waiting(frame, area, user_code, verification_url),
+            LoginState::Restoring => self.render_restoring(frame, area),
             LoginState::Success => self.render_success(frame, area),
             LoginState::Error(msg) => self.render_error(frame, area, msg),
         }
+    }
+
+    /// One frame of the waiting spinner. Shared so the restoring and waiting
+    /// screens cannot drift out of step with each other.
+    fn spinner_frame(&self) -> &'static str {
+        const FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
+        FRAMES[(self.spinner_tick as usize / 2) % FRAMES.len()]
+    }
+
+    fn render_restoring(&self, frame: &mut Frame, area: Rect) {
+        let chunks = Layout::vertical([
+            Constraint::Min(0),
+            Constraint::Length(8), // Logo
+            Constraint::Length(2), // Message
+            Constraint::Min(0),
+        ])
+        .split(area);
+
+        let logo = Paragraph::new(theme::LOGO)
+            .style(theme::title())
+            .alignment(Alignment::Center);
+        frame.render_widget(logo, chunks[1]);
+
+        let msg = Paragraph::new(Line::from(vec![
+            Span::styled(self.spinner_frame(), theme::title()),
+            Span::styled("  Restoring your session…", theme::dim()),
+        ]))
+        .alignment(Alignment::Center);
+        frame.render_widget(msg, chunks[2]);
     }
 
     fn render_idle(&self, frame: &mut Frame, area: Rect) {
@@ -203,10 +255,8 @@ impl LoginView {
         frame.render_widget(code_display, chunks[6]);
 
         // Spinner
-        let spinner_chars = ["|", "/", "-", "\\"];
-        let spinner = spinner_chars[(self.spinner_tick as usize / 2) % spinner_chars.len()];
         let waiting = Paragraph::new(Line::from(vec![
-            Span::styled(format!("{} ", spinner), theme::title()),
+            Span::styled(format!("{} ", self.spinner_frame()), theme::title()),
             Span::styled("Waiting for authorization...", theme::dim()),
         ]))
         .alignment(Alignment::Center);

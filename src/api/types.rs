@@ -547,6 +547,149 @@ pub struct DeviceTokenRequest {
     pub device_code: String,
 }
 
+// ── OAuth 2.1 device grant (RFC 8628) ────────────────────────────────
+//
+// The successor to the DeviceAuth types above. Same shape of flow, but the
+// credential it yields is a scoped, revocable OAuth token pair rather than an
+// unscoped session token, and it is issued by the authorization server at
+// /oauth/* rather than by /api/v1/auth/device.
+
+/// RFC 7591 dynamic client registration. Done once per installation.
+#[derive(Debug, Clone, Serialize)]
+pub struct OAuthRegisterRequest {
+    pub client_name: String,
+    /// A device-flow client has no redirect URI; the server only requires them
+    /// for grants that actually redirect.
+    pub redirect_uris: Vec<String>,
+    pub grant_types: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OAuthRegisterResponse {
+    pub client_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OAuthDeviceAuthRequest {
+    pub client_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OAuthDeviceAuthResponse {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    /// The same URL with the code prefilled, for when a browser can be opened.
+    #[serde(default)]
+    pub verification_uri_complete: Option<String>,
+    pub expires_in: i64,
+    /// Seconds to wait between polls. Honour it: polling faster earns `slow_down`.
+    pub interval: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OAuthTokenRequest {
+    pub grant_type: String,
+    pub client_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct OAuthTokenResponse {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub token_type: String,
+    pub expires_in: i64,
+    #[serde(default)]
+    pub scope: String,
+}
+
+/// What the token endpoint says while a device is still waiting.
+///
+/// These are not interchangeable and must not be collapsed: `Pending` and
+/// `SlowDown` mean keep going, the rest mean stop. A client that treats them all
+/// as failure quits on its first poll; one that treats them all as pending never
+/// quits at all.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DevicePollOutcome {
+    Granted(OAuthTokenResponse),
+    Pending,
+    SlowDown,
+    Denied,
+    Expired,
+    Failed(String),
+}
+
+impl DevicePollOutcome {
+    /// Map an RFC 8628 §3.5 error code onto an outcome.
+    pub fn from_error(code: &str, description: &str) -> Self {
+        match code {
+            "authorization_pending" => DevicePollOutcome::Pending,
+            "slow_down" => DevicePollOutcome::SlowDown,
+            "access_denied" => DevicePollOutcome::Denied,
+            "expired_token" => DevicePollOutcome::Expired,
+            other if description.is_empty() => DevicePollOutcome::Failed(other.to_string()),
+            other => DevicePollOutcome::Failed(format!("{other}: {description}")),
+        }
+    }
+
+    /// Whether the client should poll again.
+    pub fn keep_polling(&self) -> bool {
+        matches!(
+            self,
+            DevicePollOutcome::Pending | DevicePollOutcome::SlowDown
+        )
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OAuthErrorResponse {
+    #[serde(default)]
+    pub error: String,
+    #[serde(default)]
+    pub error_description: String,
+}
+
+// ── Identity ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct IdentityResponse {
+    pub account: IdentityAccount,
+    #[serde(default)]
+    pub user: Option<IdentityUser>,
+    #[serde(default)]
+    pub credential: Option<IdentityCredential>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct IdentityAccount {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct IdentityUser {
+    pub id: String,
+    pub name: String,
+    pub email: String,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct IdentityCredential {
+    #[serde(rename = "type")]
+    pub credential_type: String,
+    #[serde(default)]
+    pub scope: String,
+}
+
 // ── Error response ───────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize)]

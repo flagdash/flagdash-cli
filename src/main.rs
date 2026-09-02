@@ -7,12 +7,13 @@ mod app;
 mod components;
 mod config;
 mod event;
+mod gitops;
 mod theme;
 mod tui;
 mod views;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -22,25 +23,95 @@ use clap::Parser;
     author = "FlagDash <team@flagdash.io>"
 )]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Session token (overrides config file and env var)
-    #[arg(long, env = "FLAGDASH_SESSION_TOKEN")]
+    #[arg(long, env = "FLAGDASH_SESSION_TOKEN", global = true)]
     session_token: Option<String>,
 
     /// Management API key (legacy alias for --session-token)
-    #[arg(long, env = "FLAGDASH_API_KEY", hide = true)]
+    #[arg(long, env = "FLAGDASH_API_KEY", hide = true, global = true)]
     api_key: Option<String>,
 
     /// Base URL for FlagDash API
-    #[arg(long, env = "FLAGDASH_BASE_URL")]
+    #[arg(long, env = "FLAGDASH_BASE_URL", global = true)]
     base_url: Option<String>,
 
     /// Default project ID
-    #[arg(long, env = "FLAGDASH_PROJECT_ID")]
+    #[arg(long, env = "FLAGDASH_PROJECT_ID", global = true)]
     project_id: Option<String>,
 
     /// Default environment ID
-    #[arg(long, env = "FLAGDASH_ENVIRONMENT_ID")]
+    #[arg(long, env = "FLAGDASH_ENVIRONMENT_ID", global = true)]
     environment_id: Option<String>,
+}
+
+/// Non-interactive subcommands. Dispatched before the terminal is initialised,
+/// so they never touch the TUI and are safe to run in CI.
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Show what a GitOps document would change, without changing it
+    ///
+    /// Exits 0 when there is nothing to do and 2 when there are pending
+    /// changes, so any CI can gate on the result without a plugin.
+    Plan {
+        /// Document to read (default: flagdash.yaml, or flagdash.d/)
+        #[arg(long)]
+        file: Option<std::path::PathBuf>,
+
+        /// Output format: text, json or markdown
+        #[arg(long, default_value = "text")]
+        format: gitops::Format,
+
+        /// Repository identity (default: detected from git)
+        #[arg(long)]
+        repository: Option<String>,
+
+        /// Exit 0 even when there are pending changes
+        #[arg(long)]
+        exit_zero: bool,
+    },
+
+    /// Apply a GitOps document to FlagDash
+    Apply {
+        /// Document to read (default: flagdash.yaml, or flagdash.d/)
+        #[arg(long)]
+        file: Option<std::path::PathBuf>,
+
+        /// Output format: text, json or markdown
+        #[arg(long, default_value = "text")]
+        format: gitops::Format,
+
+        /// Delete resources this repository manages that the document no longer
+        /// declares. Never touches resources it does not own.
+        #[arg(long)]
+        prune: bool,
+
+        /// Overwrite resources that were changed outside the repository.
+        /// Without this an apply stops rather than reverting them.
+        #[arg(long)]
+        accept_drift: bool,
+
+        /// Repository identity (default: detected from git)
+        #[arg(long)]
+        repository: Option<String>,
+    },
+
+    /// GitOps helpers
+    Gitops {
+        #[command(subcommand)]
+        command: GitopsCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum GitopsCommand {
+    /// Print the project as a GitOps document
+    ///
+    /// The way to adopt GitOps on a project that already has flags: commit the
+    /// output rather than hand-writing it.
+    Export,
 }
 
 /// Create the log file with owner-only permissions (0600) on Unix so its
@@ -107,6 +178,55 @@ async fn main() -> Result<()> {
         cli.project_id.as_deref(),
         cli.environment_id.as_deref(),
     )?;
+
+    // Subcommands run headless and exit; only the bare invocation opens the TUI.
+    if let Some(command) = cli.command {
+        match command {
+            Command::Plan {
+                file,
+                format,
+                repository,
+                exit_zero,
+            } => {
+                let options = gitops::Options {
+                    file,
+                    format,
+                    prune: false,
+                    accept_drift: false,
+                    repository,
+                    exit_zero,
+                };
+                let code = gitops::plan(&app_config, &options).await?;
+                std::process::exit(code);
+            }
+
+            Command::Apply {
+                file,
+                format,
+                prune,
+                accept_drift,
+                repository,
+            } => {
+                let options = gitops::Options {
+                    file,
+                    format,
+                    prune,
+                    accept_drift,
+                    repository,
+                    exit_zero: true,
+                };
+                let code = gitops::apply(&app_config, &options).await?;
+                std::process::exit(code);
+            }
+
+            Command::Gitops {
+                command: GitopsCommand::Export,
+            } => {
+                gitops::export(&app_config).await?;
+                return Ok(());
+            }
+        }
+    }
 
     // Initialize terminal
     let mut terminal = tui::init()?;

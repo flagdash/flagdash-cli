@@ -641,6 +641,167 @@ impl ApiClient {
         .await
     }
 
+    // ── Secrets ──────────────────────────────────────────────────────
+    //
+    // Metadata and lifecycle only. There is no client method that returns a
+    // decrypted value, because the management API has no such action: retrieval
+    // is GET /api/v1/server/secrets/:key with a project-scoped `sk_` key, and it
+    // is deliberately out of reach of a CLI session token.
+
+    pub async fn list_secrets(
+        &self,
+        project_id: &str,
+        environment_id: &str,
+    ) -> Result<Vec<ManagedSecret>, ApiError> {
+        let resp: ManagedSecretsResponse = self
+            .get(&format!(
+                "/manage/secrets?project_id={}&environment_id={}",
+                urlencoding(project_id),
+                urlencoding(environment_id)
+            ))
+            .await?;
+        Ok(resp.secrets)
+    }
+
+    pub async fn get_secret_metadata(
+        &self,
+        key: &str,
+        project_id: &str,
+        environment_id: &str,
+    ) -> Result<ManagedSecret, ApiError> {
+        let resp: ManagedSecretResponse = self
+            .get(&format!(
+                "/manage/secrets/{}?project_id={}&environment_id={}",
+                urlencoding(key),
+                urlencoding(project_id),
+                urlencoding(environment_id)
+            ))
+            .await?;
+        Ok(resp.secret)
+    }
+
+    pub async fn create_secret(
+        &self,
+        req: &CreateSecretRequest,
+    ) -> Result<ManagedSecret, ApiError> {
+        let resp: ManagedSecretResponse = self.post("/manage/secrets", Some(req)).await?;
+        Ok(resp.secret)
+    }
+
+    pub async fn replace_secret(
+        &self,
+        key: &str,
+        project_id: &str,
+        environment_id: &str,
+        req: &ReplaceSecretRequest,
+    ) -> Result<SecretVersion, ApiError> {
+        let resp: SecretVersionResponse = self
+            .put(
+                &format!(
+                    "/manage/secrets/{}/value?project_id={}&environment_id={}",
+                    urlencoding(key),
+                    urlencoding(project_id),
+                    urlencoding(environment_id)
+                ),
+                req,
+            )
+            .await?;
+        Ok(resp.version)
+    }
+
+    pub async fn secret_versions(
+        &self,
+        key: &str,
+        project_id: &str,
+        environment_id: &str,
+    ) -> Result<SecretHistoryResponse, ApiError> {
+        self.get(&format!(
+            "/manage/secrets/{}/versions?project_id={}&environment_id={}",
+            urlencoding(key),
+            urlencoding(project_id),
+            urlencoding(environment_id)
+        ))
+        .await
+    }
+
+    pub async fn restore_secret_version(
+        &self,
+        key: &str,
+        version_id: &str,
+        project_id: &str,
+        environment_id: &str,
+        req: &RestoreSecretRequest,
+    ) -> Result<SecretVersion, ApiError> {
+        let resp: SecretVersionResponse = self
+            .post(
+                &format!(
+                    "/manage/secrets/{}/versions/{}/restore?project_id={}&environment_id={}",
+                    urlencoding(key),
+                    urlencoding(version_id),
+                    urlencoding(project_id),
+                    urlencoding(environment_id)
+                ),
+                Some(req),
+            )
+            .await?;
+        Ok(resp.version)
+    }
+
+    pub async fn approve_secret(
+        &self,
+        key: &str,
+        project_id: &str,
+        environment_id: &str,
+    ) -> Result<SecretVersion, ApiError> {
+        let resp: SecretVersionResponse = self
+            .post::<(), _>(
+                &format!(
+                    "/manage/secrets/{}/approve?project_id={}&environment_id={}",
+                    urlencoding(key),
+                    urlencoding(project_id),
+                    urlencoding(environment_id)
+                ),
+                None,
+            )
+            .await?;
+        Ok(resp.version)
+    }
+
+    pub async fn delete_secret(
+        &self,
+        key: &str,
+        project_id: &str,
+        environment_id: &str,
+    ) -> Result<(), ApiError> {
+        self.delete(&format!(
+            "/manage/secrets/{}?project_id={}&environment_id={}",
+            urlencoding(key),
+            urlencoding(project_id),
+            urlencoding(environment_id)
+        ))
+        .await
+    }
+
+    pub async fn recover_secret(
+        &self,
+        key: &str,
+        project_id: &str,
+        environment_id: &str,
+    ) -> Result<(), ApiError> {
+        let _: serde_json::Value = self
+            .post::<(), _>(
+                &format!(
+                    "/manage/secrets/{}/recover?project_id={}&environment_id={}",
+                    urlencoding(key),
+                    urlencoding(project_id),
+                    urlencoding(environment_id)
+                ),
+                None,
+            )
+            .await?;
+        Ok(())
+    }
+
     // ── AI Configs ───────────────────────────────────────────────────
 
     pub async fn list_ai_configs(

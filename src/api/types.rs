@@ -151,6 +151,92 @@ pub struct ManagedConfigResponse {
     pub config: ManagedConfig,
 }
 
+// ── Secrets ──────────────────────────────────────────────────────────
+//
+// Metadata only, on purpose. Nothing in this file can carry a decrypted value:
+// the management API has no action that returns one, and the CLI must never
+// write a credential into its config file or any cache.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedSecret {
+    pub id: String,
+    pub key: String,
+    pub name: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub description: String,
+    pub format: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default, deserialize_with = "null_default")]
+    pub has_value: bool,
+    #[serde(default)]
+    pub current_version_id: Option<String>,
+    #[serde(default)]
+    pub pending_version_id: Option<String>,
+    #[serde(default, deserialize_with = "null_default")]
+    pub approval_pending: bool,
+    #[serde(default)]
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedSecretsResponse {
+    pub secrets: Vec<ManagedSecret>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedSecretResponse {
+    pub secret: ManagedSecret,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretVersion {
+    pub version_id: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, deserialize_with = "null_default")]
+    pub created_by_id: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub current: bool,
+    #[serde(default, deserialize_with = "null_default")]
+    pub pending: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretHistoryResponse {
+    pub secret: ManagedSecret,
+    pub versions: Vec<SecretVersion>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretVersionResponse {
+    pub version: SecretVersion,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CreateSecretRequest {
+    pub project_id: String,
+    pub environment_id: String,
+    pub key: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    pub format: String,
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReplaceSecretRequest {
+    pub value: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_version_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RestoreSecretRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_version_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigEnvironmentResponse {
     pub config_environment: ConfigEnvironmentResponseData,

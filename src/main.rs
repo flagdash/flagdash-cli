@@ -8,6 +8,7 @@ mod components;
 mod config;
 mod event;
 mod gitops;
+mod secrets;
 mod theme;
 mod tui;
 mod views;
@@ -103,6 +104,114 @@ enum Command {
         #[command(subcommand)]
         command: GitopsCommand,
     },
+
+    /// Manage encrypted secrets (metadata and lifecycle only)
+    ///
+    /// There is no command that prints a secret's value, and there never will
+    /// be: a terminal is where credentials end up in scrollback, shell history
+    /// and CI logs. Read one from your application with an `sk_` key holding
+    /// `secrets:read`.
+    Secrets {
+        #[command(subcommand)]
+        command: SecretsCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum SecretsCommand {
+    /// List the secrets in the selected environment. Values are never shown.
+    List,
+
+    /// Fetch secret values for a CI step.
+    ///
+    /// Needs a project-scoped `sk_` key holding `secrets:read`, passed with
+    /// --sdk-key or FLAGDASH_SDK_KEY — not your login token. That split is the
+    /// point: a CI job gets exactly one capability, and an everyday `flagdash`
+    /// on a developer's laptop cannot print a production credential.
+    ///
+    /// On GitHub Actions the values are registered with `::add-mask::` before
+    /// they are printed, so they are redacted from the job log.
+    ///
+    ///   flagdash secrets fetch stripe-secret-key --format raw
+    ///   flagdash secrets fetch db-password api-token --format env >> "$GITHUB_ENV"
+    ///   flagdash secrets fetch gcp-credentials --format json --out /tmp/gcp.json
+    Fetch {
+        /// One or more secret keys
+        #[arg(required = true)]
+        keys: Vec<String>,
+
+        /// Project-scoped SDK key with secrets:read
+        #[arg(long, env = "FLAGDASH_SDK_KEY", hide_env_values = true)]
+        sdk_key: Option<String>,
+
+        /// Output format: raw (one key), env, or json
+        #[arg(long, default_value = "raw")]
+        format: secrets::OutputFormat,
+
+        /// Write to this file (mode 0600) instead of stdout
+        #[arg(long, value_name = "PATH")]
+        out: Option<std::path::PathBuf>,
+
+        /// Do not emit CI log-masking directives
+        #[arg(long)]
+        no_mask: bool,
+    },
+
+    /// Show one secret's metadata: format, status, current version.
+    Show { key: String },
+
+    /// Create a secret. The value is read from a file or stdin, never argv.
+    Create {
+        key: String,
+
+        /// Display name (defaults to the key)
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Optional description
+        #[arg(long, default_value = "")]
+        description: String,
+
+        /// Secret format: string or json
+        #[arg(long, default_value = "string")]
+        format: String,
+
+        /// Read the value from this file
+        #[arg(long, value_name = "PATH")]
+        from_file: Option<std::path::PathBuf>,
+
+        /// Read the value from stdin
+        #[arg(long)]
+        stdin: bool,
+    },
+
+    /// Replace a secret's value with a new encrypted version.
+    Set {
+        key: String,
+
+        /// Read the new value from this file
+        #[arg(long, value_name = "PATH")]
+        from_file: Option<std::path::PathBuf>,
+
+        /// Read the new value from stdin
+        #[arg(long)]
+        stdin: bool,
+    },
+
+    /// List a secret's version history (metadata only).
+    Versions { key: String },
+
+    /// Restore a historical version as a new encrypted version.
+    Restore { key: String, version_id: String },
+
+    /// Approve a pending change. Must be a different user than the author.
+    Approve { key: String },
+
+    /// Soft-delete a secret. Recoverable for seven days.
+    Delete { key: String },
+
+    /// Recover a soft-deleted secret within the recovery window.
+    Recover { key: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -223,6 +332,72 @@ async fn main() -> Result<()> {
                 command: GitopsCommand::Export,
             } => {
                 gitops::export(&app_config).await?;
+                return Ok(());
+            }
+
+            Command::Secrets { command } => {
+                match command {
+                    SecretsCommand::List => secrets::list(&app_config).await?,
+                    SecretsCommand::Fetch {
+                        keys,
+                        sdk_key,
+                        format,
+                        out,
+                        no_mask,
+                    } => {
+                        let options = secrets::FetchOptions {
+                            keys,
+                            sdk_key,
+                            format,
+                            out,
+                            no_mask,
+                        };
+                        secrets::fetch(&app_config, &options).await?
+                    }
+                    SecretsCommand::Show { key } => secrets::show(&app_config, &key).await?,
+                    SecretsCommand::Create {
+                        key,
+                        name,
+                        description,
+                        format,
+                        from_file,
+                        stdin,
+                    } => {
+                        let source = secrets::ValueSource {
+                            file: from_file,
+                            stdin,
+                        };
+                        secrets::create(
+                            &app_config,
+                            &key,
+                            name.as_deref(),
+                            &description,
+                            &format,
+                            &source,
+                        )
+                        .await?
+                    }
+                    SecretsCommand::Set {
+                        key,
+                        from_file,
+                        stdin,
+                    } => {
+                        let source = secrets::ValueSource {
+                            file: from_file,
+                            stdin,
+                        };
+                        secrets::set(&app_config, &key, &source).await?
+                    }
+                    SecretsCommand::Versions { key } => {
+                        secrets::versions(&app_config, &key).await?
+                    }
+                    SecretsCommand::Restore { key, version_id } => {
+                        secrets::restore(&app_config, &key, &version_id).await?
+                    }
+                    SecretsCommand::Approve { key } => secrets::approve(&app_config, &key).await?,
+                    SecretsCommand::Delete { key } => secrets::delete(&app_config, &key).await?,
+                    SecretsCommand::Recover { key } => secrets::recover(&app_config, &key).await?,
+                }
                 return Ok(());
             }
         }

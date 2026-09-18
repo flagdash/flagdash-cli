@@ -250,3 +250,12 @@ cross build --release --target x86_64-unknown-linux-gnu
 ## License
 
 MIT
+
+## Remote config value format
+
+The config value editor displays the inner application value and saves it inside
+one `{"value": ...}` envelope. Enter objects, arrays or scalar JSON directly in
+the editor. An application object `{"value": 7}` is stored as
+`{"value": {"value": 7}}`; reopening it displays the original application object.
+MCP and management API writes also normalize bare objects to this envelope.
+Existing bare stored objects are migrated with their secret-reference bindings.

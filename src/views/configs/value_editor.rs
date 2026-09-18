@@ -29,7 +29,9 @@ impl ConfigValueEditorView {
     }
 
     pub fn set_value(&mut self, value: &serde_json::Value) {
-        let formatted = serde_json::to_string_pretty(value).unwrap_or_default();
+        let formatted =
+            serde_json::to_string_pretty(value.get("value").unwrap_or(&serde_json::Value::Null))
+                .unwrap_or_default();
         self.editor.set_content(&formatted);
     }
 
@@ -40,7 +42,9 @@ impl ConfigValueEditorView {
     }
 
     pub fn parse_value(&self) -> Result<serde_json::Value, String> {
-        serde_json::from_str(&self.editor.content()).map_err(|e| e.to_string())
+        serde_json::from_str::<serde_json::Value>(&self.editor.content())
+            .map(|value| serde_json::json!({"value": value}))
+            .map_err(|e| e.to_string())
     }
 
     pub fn handle_event(&mut self, event: &Event) -> Option<Action> {
@@ -112,5 +116,30 @@ impl ConfigValueEditorView {
             ])),
             chunks[3],
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn editor_round_trips_inner_json_without_double_wrapping() {
+        for value in [
+            serde_json::json!({"value": 7, "sibling": false}),
+            serde_json::json!([1, false, null]),
+            serde_json::json!(false),
+            serde_json::json!(0),
+            serde_json::json!(""),
+            serde_json::Value::Null,
+        ] {
+            let stored = serde_json::json!({"value": value});
+            let mut editor = ConfigValueEditorView::new("test");
+            editor.set_value(&stored);
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&editor.editor.content()).unwrap(),
+                value
+            );
+            assert_eq!(editor.parse_value().unwrap(), stored);
+        }
     }
 }
